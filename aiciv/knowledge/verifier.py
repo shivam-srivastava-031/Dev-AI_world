@@ -361,7 +361,7 @@ class Verifier:
         """
         candidates: list[tuple[ClaimRecord, str, Verdict, ClaimState]] = []
 
-        for record in kb.open_records():
+        for record in kb.advanceable_records():
             claim = record.claim
             if record.state is ClaimState.REGISTERED:
                 kb.set_state(claim.claim_id, ClaimState.TESTING, self.token, tick)

@@ -52,7 +52,8 @@ class RandomPolicy:
                 return ActionProposal(Verb.MOVE, {"tile": step})
 
         free = [t["tile"] for t in obs.nearby_tiles
-                if t["terrain"] == "arable" and not t["planted"]]
+                if t["terrain"] == "arable" and not t["planted"]
+                and not t.get("fallow")]
         can_plant = (free and obs.seeds > 0 and obs.water_stock >= 4
                      and len(obs.plots) < ctx.config.max_concurrent_plots)
         if can_plant and rng.random() < 0.7:

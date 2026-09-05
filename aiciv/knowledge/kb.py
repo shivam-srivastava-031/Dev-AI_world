@@ -15,8 +15,8 @@ from ..config import MAX_OPEN_CLAIMS, REGISTER_COST
 from ..ids import AgentId, ClaimId, claim_id as make_claim_id
 from ..world.actions import RejectionCode
 from .claim import (
-    LEGAL_TRANSITIONS, ClaimRecord, ClaimState, KnowledgeClaim, OPEN_STATES,
-    TEACHABLE_STATES,
+    ADVANCEABLE_STATES, LEGAL_TRANSITIONS, OPEN_STATES, TEACHABLE_STATES,
+    ClaimRecord, ClaimState, KnowledgeClaim,
 )
 from .replication import CHANNEL_PUBLIC, CHANNEL_TEACH, CommunicationLog
 
@@ -33,10 +33,15 @@ class KnowledgeBase:
     def get(self, cid: ClaimId) -> ClaimRecord | None:
         return self.records.get(cid)
 
-    def open_records(self) -> list[ClaimRecord]:
-        # Sorted so a verification round is order-independent.
+    def advanceable_records(self) -> list[ClaimRecord]:
+        """Claims the Verifier should re-examine. Sorted so a round is
+        order-independent."""
         return [self.records[c] for c in sorted(self.records, key=str)
-                if self.records[c].state in OPEN_STATES]
+                if self.records[c].state in ADVANCEABLE_STATES]
+
+    # Back-compat alias; prefer advanceable_records.
+    def open_records(self) -> list[ClaimRecord]:
+        return self.advanceable_records()
 
     def by_state(self, state: ClaimState) -> list[ClaimRecord]:
         return [r for r in self.records.values() if r.state is state]

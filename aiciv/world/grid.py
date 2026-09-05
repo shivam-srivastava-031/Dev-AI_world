@@ -34,9 +34,9 @@ class Stratum(str, Enum):
 #: actually reach CONFIRMED; holdout stays small because it is only spent once
 #: per claim.
 STRATUM_FRACTIONS: dict[Stratum, float] = {
-    Stratum.DISCOVERY: 0.70,
-    Stratum.CONFIRMATION: 0.20,
-    Stratum.HOLDOUT: 0.10,
+    Stratum.DISCOVERY: 0.60,
+    Stratum.CONFIRMATION: 0.25,
+    Stratum.HOLDOUT: 0.15,
 }
 
 

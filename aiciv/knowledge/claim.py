@@ -42,10 +42,19 @@ class ClaimState(str, Enum):
     WITHDRAWN = "withdrawn"
 
 
-#: States in which a claim is still gathering evidence.
+#: States that count against an agent's open-claim budget. A CONFIRMED claim
+#: is finished work and must NOT occupy a registration slot.
 OPEN_STATES = frozenset({ClaimState.PROPOSED, ClaimState.REGISTERED,
                          ClaimState.TESTING, ClaimState.SUPPORTED,
                          ClaimState.CONTESTED})
+
+#: States the Verifier must keep re-examining each round.
+#: CONFIRMED belongs here and not in OPEN_STATES: a confirmed claim is still
+#: eligible to advance to GENERALIZED on holdout evidence, but it no longer
+#: costs its author a registration slot. Conflating the two made GENERALIZED
+#: unreachable in practice -- the stage was never evaluated even when ample
+#: holdout evidence existed.
+ADVANCEABLE_STATES = OPEN_STATES | {ClaimState.CONFIRMED}
 
 #: States that count as public knowledge an agent may teach.
 TEACHABLE_STATES = frozenset({ClaimState.TESTING, ClaimState.SUPPORTED,

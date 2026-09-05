@@ -69,6 +69,7 @@ class WorldState:
     tick: int = 0
     agents: dict[AgentId, Agent] = field(default_factory=dict)
     crops: dict[TileId, Crop] = field(default_factory=dict)
+    fallow_until: dict[TileId, int] = field(default_factory=dict)
     next_trial_id: int = 1
 
     # ---- ordering ---------------------------------------------------------
@@ -77,6 +78,15 @@ class WorldState:
         """ALWAYS iterate agents through this. Dict order must never leak into
         results; conflicts are resolved by ascending agent_id."""
         return sorted(self.agents)
+
+    def is_fallow(self, tile_id: TileId) -> bool:
+        """Recently harvested ground rests before it can be planted again.
+
+        Applied identically to every tile regardless of stratum, so it
+        moves agents around the map without telling them anything about
+        which tiles count toward which verification stage.
+        """
+        return self.fallow_until.get(tile_id, -1) > self.tick
 
     @property
     def day_of_cycle(self) -> int:
@@ -95,6 +105,8 @@ class WorldState:
             self.tick,
             [self.agents[a].hash_parts() for a in self.agent_ids()],
             [self.crops[t].hash_parts() for t in sorted(self.crops, key=int)],
+            [[int(t), self.fallow_until[t]]
+             for t in sorted(self.fallow_until, key=int)],
             self.next_trial_id,
         )
 
@@ -125,6 +137,7 @@ class WorldState:
                         stage=c.stage)
                 for t, c in self.crops.items()
             },
+            fallow_until=dict(self.fallow_until),
             next_trial_id=self.next_trial_id,
         )
 

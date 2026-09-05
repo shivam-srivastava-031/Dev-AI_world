@@ -84,6 +84,7 @@ class RejectionCode(str, Enum):
     E_RES_INSUFFICIENT_WATER = "E_RES_INSUFFICIENT_WATER"
     E_RES_NO_SEEDS = "E_RES_NO_SEEDS"
     E_RES_TILE_ALREADY_PLANTED = "E_RES_TILE_ALREADY_PLANTED"
+    E_RES_TILE_FALLOW = "E_RES_TILE_FALLOW"
     E_RES_TILE_NOT_PLANTED = "E_RES_TILE_NOT_PLANTED"
     E_RES_CROP_NOT_MATURE = "E_RES_CROP_NOT_MATURE"
     E_RES_ENERGY = "E_RES_ENERGY"
@@ -152,6 +153,7 @@ HINTS: dict[RejectionCode, str] = {
     RejectionCode.E_RES_INSUFFICIENT_WATER: "You do not carry enough water for that.",
     RejectionCode.E_RES_NO_SEEDS: "You have no seeds.",
     RejectionCode.E_RES_TILE_ALREADY_PLANTED: "Something is already growing there.",
+    RejectionCode.E_RES_TILE_FALLOW: "That ground was worked too recently and needs to rest.",
     RejectionCode.E_RES_TILE_NOT_PLANTED: "Nothing is growing there.",
     RejectionCode.E_RES_CROP_NOT_MATURE: "That crop is not ready to harvest yet.",
     RejectionCode.E_RES_ENERGY: "You are too tired. Rest first.",

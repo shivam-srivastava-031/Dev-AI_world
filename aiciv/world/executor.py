@@ -91,6 +91,9 @@ def execute(
         tile = state.grid.by_id(tid)
         crop = state.crops.pop(tid)
         agent.plots.discard(tid)
+        # The tile rests. Uniform across strata: this rotates agents around
+        # the map without revealing which tiles count for which stage.
+        state.fallow_until[tid] = state.tick + state.config.fallow_ticks
 
         recipe = {k: v for k, v in crop.recipe.items() if not k.startswith("_")}
         skill_at_plant = float(crop.recipe.get("_skill_at_plant", 0.0))

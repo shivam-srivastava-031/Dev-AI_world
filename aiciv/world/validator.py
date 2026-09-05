@@ -170,6 +170,11 @@ def validate(
         if tile_id in state.crops:
             return _reject(RejectionCode.E_RES_TILE_ALREADY_PLANTED,
                            "something already grows there")
+        if state.is_fallow(tile_id):
+            return _reject(
+                RejectionCode.E_RES_TILE_FALLOW,
+                f"rested until tick {state.fallow_until[tile_id]}, "
+                f"it is {state.tick}")
         if len(agent.plots) >= state.config.max_concurrent_plots:
             return _reject(RejectionCode.E_RES_TOO_MANY_PLOTS,
                            f"you already tend {len(agent.plots)} plots "

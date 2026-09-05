@@ -120,7 +120,8 @@ class _ScriptedBase:
             return act
 
         free = [t for t in obs.nearby_tiles
-                if t["terrain"] == "arable" and not t["planted"]]
+                if t["terrain"] == "arable" and not t["planted"]
+                and not t.get("fallow")]
         if free and obs.seeds > 0 and len(obs.plots) < ctx.config.max_concurrent_plots:
             companion, spacing = self._next_condition(ctx)
             tile = free[0]["tile"]

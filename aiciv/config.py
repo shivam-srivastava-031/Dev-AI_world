@@ -9,6 +9,8 @@ from .hashing import blake2b_hex
 # --- calibrated constants (docs/statistics.md) ---------------------------
 MAX_CONCURRENT_PLOTS = 4     # 1 plot => only ~5 claims affordable per run
 MATURATION_TICKS = 6
+FALLOW_TICKS = 10           # a harvested tile rests; forces rotation so
+                            # ordinary farming samples every stratum
 SEED_COST = 1
 WATER_CARRY_MAX = 8
 ENERGY_MAX = 10.0
@@ -49,6 +51,7 @@ class RunConfig:
     teaching_enabled: bool = True
     max_concurrent_plots: int = MAX_CONCURRENT_PLOTS
     maturation_ticks: int = MATURATION_TICKS
+    fallow_ticks: int = FALLOW_TICKS
     rejection_costs_tick: bool = True
 
     arm: str = "default"

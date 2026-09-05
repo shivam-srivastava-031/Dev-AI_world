@@ -82,6 +82,7 @@ def build_observation(
             "tile": [tile.x, tile.y],
             "terrain": tile.terrain.value,
             "planted": crop is not None,
+            "fallow": state.is_fallow(tile.tile_id),
             "crop_ready": crop is not None and crop.stage.value == "mature",
             "mine": crop is not None and int(crop.planter) == int(agent_id),
             "soil_band": known_soil.get(int(tile.tile_id)),

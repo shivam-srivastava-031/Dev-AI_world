@@ -178,7 +178,7 @@ class Engine:
         # 8-11. RECORD EVIDENCE / UPDATE BELIEFS / VERIFY / COMMUNICATE
         self.trials.extend(tick_trials)
         self.trials_by_id.update({int(x.trial_id): x for x in tick_trials})
-        if self.kb.open_records():
+        if self.kb.advanceable_records():
             self.verifier.run_round(
                 self.kb, lambda rec: self.rows(), t,
                 self.run_secret, self.trials_by_id)
