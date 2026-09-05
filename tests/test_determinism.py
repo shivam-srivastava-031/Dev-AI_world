@@ -134,12 +134,21 @@ def test_world_generation_is_a_pure_function_of_seed():
 
 
 def test_stratum_partition_matches_target_fractions():
+    """Expectations are READ from STRATUM_FRACTIONS rather than hardcoded.
+
+    A previous version pinned 70/20/10 as literals and went stale the moment
+    the partition was rebalanced, failing for a reason that had nothing to do
+    with the property being tested.
+    """
+    from aiciv.world.grid import STRATUM_FRACTIONS
+
     counts = generate_world(42).stratum_counts()
     total = sum(counts.values())
-    fracs = {s.value: v / total for s, v in counts.items()}
-    assert fracs["discovery"] == pytest.approx(0.70, abs=0.06)
-    assert fracs["confirmation"] == pytest.approx(0.20, abs=0.06)
-    assert fracs["holdout"] == pytest.approx(0.10, abs=0.06)
+    for stratum, target in STRATUM_FRACTIONS.items():
+        got = counts[stratum] / total
+        assert got == pytest.approx(target, abs=0.06), (
+            f"{stratum.value}: {got:.3f} vs target {target}")
+    assert sum(STRATUM_FRACTIONS.values()) == pytest.approx(1.0)
 
 
 def test_strata_are_interleaved_not_spatial():

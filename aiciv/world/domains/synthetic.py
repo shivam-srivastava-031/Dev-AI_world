@@ -76,6 +76,7 @@ class SyntheticDomain(Domain):
         min_effect_size=0.5,
         correction="bh",
         max_trials=60,
+        min_trials_holdout=12,      # calibrated at alpha=0.05
         balance_mode="adjust",
         calibrated_by="power-analysis-2026-09-05",
     )

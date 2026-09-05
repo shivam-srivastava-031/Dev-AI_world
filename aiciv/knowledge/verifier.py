@@ -311,8 +311,14 @@ class Verifier:
         spec = self.spec
         n_t, n_c = len(treat), len(ctrl)
 
-        if n_t < spec.min_trials_per_group or n_c < spec.min_trials_per_group:
-            return Verdict(stage, False, "insufficient_evidence", None, n_t, n_c)
+        # The holdout stage carries its own calibrated sample size: it re-tests
+        # an effect already established twice, at a looser alpha, so demanding
+        # the discovery-stage n there made GENERALIZED practically unreachable.
+        need = (spec.min_trials_holdout if stage == STAGE_GENERALIZED
+                else spec.min_trials_per_group)
+        if n_t < need or n_c < need:
+            return Verdict(stage, False, "insufficient_evidence", None, n_t, n_c,
+                           {"required_per_group": need})
 
         tiles = {r["tile_id"] for r in treat} | {r["tile_id"] for r in ctrl}
         if len(tiles) < spec.min_tiles:

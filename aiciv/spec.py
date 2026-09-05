@@ -27,6 +27,10 @@ class VerificationSpec:
     correction: str               # "bh" | "bonferroni" | "none"
     max_trials: int               # budget before a claim is REFUTED
     balance_mode: str             # "adjust" | "gate" | "off"
+    #: The GENERALIZED stage re-tests an effect already established twice,
+    #: at a looser alpha, so it needs fewer trials. Still MEASURED, never
+    #: chosen: see docs/statistics.md.
+    min_trials_holdout: int = 12
     calibrated_by: str = "uncalibrated"
 
     def __post_init__(self) -> None:

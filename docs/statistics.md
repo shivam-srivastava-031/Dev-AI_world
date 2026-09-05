@@ -217,16 +217,129 @@ Two calibration notes learned the hard way:
   water while sweeping cells means early cells are measured at the wrong water
   and look bad for a reason unrelated to their companion.
 
-### Open issues from this run
+## 4.2 Making GENERALIZED reachable (2026-09-05)
 
-* **Holdout evidence is thin** — 40 of 1656 trials (2.4%), because agents
-  cluster on a few tiles rather than roaming. `GENERALIZED` is therefore rarely
-  reachable in practice even though the machinery works. Either agents need a
-  reason to spread out, or the holdout fraction needs raising.
-* **`protocol_adoption_rate` is not yet like-for-like.** The shadow verifier
-  scans marginal single-variable hypotheses and cannot represent the
-  companion x spacing interaction, so agent claims are strictly richer than
-  anything it proposes. See the limitation note in `knowledge/shadow.py`.
+A state that is theoretically defined but practically unreachable is not a
+metric. In the first Phase 4 run only 40 of 1656 trials (2.4%) landed on holdout
+tiles and **no claim ever reached GENERALIZED**.
+
+### The invariant that had to survive the fix
+
+```
+agent cannot know stratum
+agent cannot target stratum
+verifier can accumulate enough holdout evidence
+```
+
+So the fix had to be at the WORLD level, not by telling anyone anything.
+
+### Three changes, none of which expose the partition
+
+1. **Fallow after harvest** (`FALLOW_TICKS = 10`). A harvested tile rests before
+   it can be replanted. Applied identically to every tile regardless of
+   stratum, so it rotates agents around the map while carrying zero information
+   about which tiles count for which stage. Tiles farmed per agent went from a
+   tight cluster to 15-60; holdout trials went 40 -> 136.
+2. **Rebalanced partition**, 70/20/10 -> **60/25/15**.
+3. **A separate, calibrated holdout sample size.**
+
+### The actual bug, which was neither of those
+
+`CONFIRMED` was not in `OPEN_STATES`, so `open_records()` dropped confirmed
+claims and the verifier **never evaluated the generalized stage at all** — even
+with 28 spec / 30 baseline holdout trials available against a requirement of 16.
+Split into two sets: `OPEN_STATES` (counts against an agent's registration
+budget) and `ADVANCEABLE_STATES` (the verifier keeps re-examining, and includes
+`CONFIRMED`). Conflating "still costs a slot" with "still worth checking" is
+what made the state decorative.
+
+### `min_trials_holdout` — calibrated at alpha = 0.05, 6000 replicates
+
+The holdout stage re-tests an effect already established twice, at a looser
+alpha, so it needs fewer trials. Still measured, never chosen:
+
+| n | power | 95% CI | clears 0.80 |
+|---:|---:|---|---|
+| 8 | 0.677 | [0.666, 0.689] | no |
+| 10 | 0.779 | [0.768, 0.789] | no |
+| **12** | **0.857** | **[0.847, 0.865]** | **yes** |
+| 16 | 0.921 | [0.914, 0.928] | yes |
+
+**`min_trials_holdout = 12`.** Null FPR at that n: 0.0513, 95% CI
+[0.0483, 0.0545] — contains nominal 0.05.
+
+### Result
+
+| ticks | seeds reaching GENERALIZED |
+|---:|---|
+| 800 | 0/5 (claims register ~tick 620-745; no time to accumulate) |
+| 1000 | 3/5 |
+| **1200** | **5/5** — first transition at tick 848-1103 |
+
+Time-to-GENERALIZED is a property of the *policy*, not a defect: brute-force
+factorial search spends ~190 trials per agent before it registers anything. A
+policy that formed hypotheses earlier would get there sooner, which is exactly
+the kind of difference the LLM arms are meant to expose.
+
+### Verified: agents cannot target strata
+
+Chi-square of **distinct tiles farmed** against the stratum mix of arable tiles
+(trial counts are inflated by revisits and are not independent draws):
+
+| seed | tiles | discovery | confirmation | holdout | chi2 p |
+|---:|---:|---:|---:|---:|---:|
+| 42 | 121 | 71.9% | 12.4% | 15.7% | 0.056 |
+| 43 | 80 | 58.8% | 26.2% | 15.0% | 0.897 |
+| 44 | 120 | 60.8% | 24.2% | 15.0% | 0.802 |
+| 45 | 132 | 62.1% | 21.2% | 16.7% | 0.936 |
+| 46 | 77 | 57.1% | 23.4% | 19.5% | 0.711 |
+
+Available (arable): 58.6% / 25.3% / 16.1%. All p > 0.05 — no evidence of
+targeting. Seed 42's earlier-looking deviation is sampling noise at p = 0.056,
+which is why this is measured across seeds rather than asserted from one.
+
+---
+
+## 4.3 Protocol adoption — a fair denominator
+
+`registered_claims / X` is only fair if `X` counts occasions when the agent
+could reasonably have formed a hypothesis. Dividing by ticks, or trials, or by
+what the world knows to be true, punishes an agent for never having encountered
+comparable evidence — which is not a failure to adopt the protocol.
+
+**Opportunity** (`aiciv/metrics/adoption.py`): this agent, from its OWN observed
+trials, held at least `MIN_PER_ARM = 6` results in each of two levels of one
+parameter. That is when a comparison became formulable *to it*.
+
+Two rules the module obeys, both enforced by tests:
+
+1. **Only agent-visible fields.** Rows are projected through `VISIBLE_FIELDS`
+   before use, so `stratum`, `true_mu` and `signature` cannot influence the
+   answer. `test_result_is_identical_with_and_without_hidden_fields` proves it
+   by removing them and asserting the output is unchanged.
+2. **No opportunity means UNDEFINED, not zero.** An agent that never had a
+   formulable comparison is excluded from the aggregate rather than scored 0.0.
+
+Two rates, answering different questions:
+
+| metric | question |
+|---|---|
+| `formal_protocol_adoption` | did it register anything at all, per salient chance |
+| `matched_adoption` | did it register a claim about *that* contrast |
+
+`salient` uses the agent's **own observed** standardised effect (>= 0.5), never
+ground truth: a contrast it could form but which looked like nothing to it is a
+weaker expectation than one that looked substantial.
+
+### Still open
+
+**The shadow verifier's ratio is not like-for-like.** It scans marginal
+single-variable hypotheses and cannot represent the companion x spacing
+interaction, so agent claims are strictly richer than anything it proposes. Its
+`protocol_adoption_rate` is superseded for per-agent grading by
+`aiciv/metrics/adoption.py`; the shadow figure remains useful only as a coarse
+"was there discoverable signal at all" check. See the limitation note in
+`knowledge/shadow.py`.
 
 ---
 

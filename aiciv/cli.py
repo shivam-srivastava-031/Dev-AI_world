@@ -18,6 +18,7 @@ from . import __name__ as _pkg  # noqa: F401
 from .config import RunConfig
 from .world.domains.synthetic import SyntheticDomain
 from .knowledge.shadow import ShadowVerifier, adoption_metrics
+from .metrics.adoption import adoption_report
 from .world.engine import Engine
 
 NOT_YET = {
@@ -107,6 +108,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     # The shadow verifier measures what the EVIDENCE supports, whether or not
     # any agent filed paperwork. Its ratio to agent-confirmed claims is
     # protocol adoption -- a finding, not an assumption.
+    # Adoption graded on each agent's own information state: an agent that
+    # never had a formulable comparison is excluded, not scored zero.
+    rows_by_agent: dict[int, list[dict]] = {}
+    for row in engine.rows():
+        rows_by_agent.setdefault(int(row["agent_id"]), []).append(row)
+    claims_by_agent: dict[int, list] = {}
+    for r in engine.kb:
+        if r.registered_tick is not None:
+            claims_by_agent.setdefault(int(r.claim.author), []).append(r.claim)
+    adoption = adoption_report(rows_by_agent, claims_by_agent)
+
     shadow = ShadowVerifier(domain.verification)
     findings = shadow.scan(engine.rows())
     shadow_confirmed = sum(1 for f in findings if f.stage == "confirmed")
@@ -123,6 +135,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "rejections": engine.rejection_summary(),
         "claim_states": {k: v for k, v in engine.kb.counts().items() if v},
         "claims": claims,
+        "adoption": adoption,
         "shadow": {
             **adoption_metrics(agent_confirmed, shadow_confirmed),
             "shadow_findings": [f.describe() for f in findings],

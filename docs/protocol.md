@@ -48,6 +48,40 @@ terms:
 - **The scientific protocol is an affordance, not a mandate.** An agent may
   ignore the knowledge base entirely and simply farm, remember, and talk.
 
+### 2.1a Protocol adoption is graded on the agent's information state
+
+Whether the civilization adopted formal method is a headline result, so its
+denominator has to be fair. `registered_claims / X` is only meaningful if `X`
+counts occasions when the agent could reasonably have formed a hypothesis.
+Dividing by ticks, by trials, or by what the world knows to be true penalises an
+agent for never having encountered comparable evidence — which is not a refusal
+to do science.
+
+**An opportunity is:** this agent, from its OWN observed trials, held at least
+`MIN_PER_ARM` results in each of two levels of one parameter. That is the moment
+a comparison became formulable *to it*. The record includes `arose_tick`, so an
+agent is never faulted for failing to register a claim before it had the
+evidence.
+
+Two binding rules (`aiciv/metrics/adoption.py`):
+
+1. **Only agent-visible fields.** Rows are projected before use; `stratum`,
+   `true_mu` and `signature` cannot influence the result. Proven by removing
+   them and asserting the output is byte-identical.
+2. **No opportunity means UNDEFINED, not zero.** An agent with nothing to adopt
+   is excluded from the aggregate rather than scored 0.0.
+
+Two rates, answering different questions:
+
+| metric | question |
+|---|---|
+| `formal_protocol_adoption` | did it register anything at all, per salient chance |
+| `matched_adoption` | did it register a claim about *that specific* contrast |
+
+Salience uses the agent's **own observed** standardised effect, never ground
+truth: a contrast it could form but which looked like nothing to it is a weaker
+expectation than one that looked substantial.
+
 ### 2.2 The shadow verifier
 
 Because the protocol is optional for agents but measurement is mandatory for us,
@@ -122,13 +156,49 @@ Only `Verifier` moves state, via a `VerifierToken` constructed once inside
 ### 4.3 Tile strata
 
 The 400 tiles are partitioned **by hash, interleaved rather than spatially**
-(70% discovery / 20% confirmation / 10% holdout), so an agent farming near home
+(60% discovery / 25% confirmation / 15% holdout), so an agent farming near home
 still hits all three.
 
 Tiles look and behave identically and the stratum never appears in an
 `Observation`. We deliberately do **not** block agents from planting on holdout
 tiles: blocking would leak the partition through rejection codes. The stratum
 only decides which trials count toward which stage.
+
+#### The invariant
+
+```
+agent cannot know stratum
+agent cannot target stratum
+verifier can accumulate enough holdout evidence
+```
+
+All three must hold simultaneously. The third is not automatic: in the first
+Phase 4 runs agents clustered on a handful of tiles, only 2.4% of trials landed
+on holdout ground, and `GENERALIZED` was never reached. A state that is defined
+but practically unreachable is not a metric.
+
+#### Experimental opportunity, enforced at the world level
+
+The fix is a **fallow period**: a harvested tile rests for `FALLOW_TICKS` before
+it can be planted again. This is a uniform world rule applied identically to
+every tile *regardless of stratum*, so it rotates agents across the map without
+telling anyone anything about which tiles count for which stage. Fallow status
+is visible (a tile you just worked is obviously spent), the stratum is not.
+
+Consequences, measured: distinct tiles farmed per agent rose to 15-60, holdout
+trials rose from 40 to ~180 per run, and `GENERALIZED` became reachable under an
+honest control policy that has no privileged information.
+
+**Verification of the second invariant is empirical, not asserted.** A
+chi-square of *distinct tiles farmed* against the stratum mix of available
+arable tiles must show no deviation. Measured across five seeds: all p > 0.05.
+Distinct tiles rather than trial counts, because revisits are not independent
+draws.
+
+The holdout stage carries its own calibrated sample size (`min_trials_holdout`),
+smaller than the discovery-stage requirement because it re-tests an effect
+already established twice at a looser alpha. It is measured, not chosen — see
+`docs/statistics.md`.
 
 ### 4.4 Why fabrication is structurally impossible
 
