@@ -110,8 +110,7 @@ class Engine:
         snapshot = state.snapshot()
 
         # 2-4. OBSERVE / REMEMBER / PROPOSE -- all against the same snapshot
-        proposals: list[tuple[int, ActionProposal]] = []
-        for aid in snapshot.agent_ids():
+        def _decide(aid) -> tuple[int, ActionProposal]:
             a = int(aid)
             obs = build_observation(
                 snapshot, aid,
@@ -130,6 +129,8 @@ class Engine:
             )
             ctx = PolicyContext(
                 agent_id=a, tick=t,
+                # Key-derived, so a policy's randomness does not depend on the
+                # order threads happen to run in.
                 rng=derive_rng(self.config.seed, "policy", t, a),
                 config=self.config,
                 param_space={k: v.values for k, v in self.domain.param_space.items()},
@@ -137,11 +138,36 @@ class Engine:
                 calibration_axis=self.domain.calibration_axis,
                 schedule_axis=self.domain.schedule_axis,
             )
-            proposals.append((a, self.policies[a].decide(obs, ctx)))
+            return (a, self.policies[a].decide(obs, ctx))
+
+        ids = snapshot.agent_ids()
+        workers = max(1, int(getattr(self.config, "decide_workers", 1)))
+        if workers > 1 and len(ids) > 1:
+            # Safe because DECIDE is pure with respect to world state: every
+            # agent sees the SAME frozen snapshot, and nothing here writes to
+            # it. Results are sorted back into agent_id order, so the executor
+            # still resolves conflicts deterministically regardless of which
+            # thread finished first.
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                proposals = sorted(pool.map(_decide, ids), key=lambda p: p[0])
+        else:
+            proposals = [_decide(aid) for aid in ids]
+
+        tick_events: list[Event] = []
+
+        # Drain whatever the policies recorded about their own calls. A
+        # degraded run must be visible in the event log, or a tick the model
+        # never answered looks identical to one where it chose to do nothing.
+        for a, policy in sorted(self.policies.items()):
+            drain = getattr(policy, "drain_call_log", None)
+            if drain is None:
+                continue
+            for rec in drain():
+                tick_events.append(Event(t, "llm_call", a, rec))
 
         # 5-7. VALIDATE / EXECUTE / WORLD OUTCOME
         rejections: list[tuple[int, Rejection]] = []
-        tick_events: list[Event] = []
         tick_trials: list[Trial] = []
         claimed: set = set()
 

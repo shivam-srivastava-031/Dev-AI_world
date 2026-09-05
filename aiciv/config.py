@@ -53,6 +53,12 @@ class RunConfig:
     maturation_ticks: int = MATURATION_TICKS
     fallow_ticks: int = FALLOW_TICKS
     rejection_costs_tick: bool = True
+    #: Threads for the DECIDE phase. Safe at any value because every agent
+    #: decides against the SAME frozen snapshot and results are reassembled
+    #: in agent_id order -- the property the phase separation was designed
+    #: for. 1 keeps scripted runs single-threaded; raise it for LLM arms,
+    #: where a decision costs ~25s and the run is entirely latency-bound.
+    decide_workers: int = 1
 
     arm: str = "default"
     notes: str = ""

@@ -319,3 +319,82 @@ def test_method_detector_does_not_fire_on_an_empty_answer():
     base = run_probe(d, lambda p: "I would just plant things and hope.",
                      model="fake")
     assert not base.controlled_comparison_is_latent
+
+
+# --- reasoning models ------------------------------------------------------
+
+def test_reasoning_trace_is_stripped_before_scoring():
+    """A model that muses "should I control for soil?" and then proposes
+    nothing has not proposed a method.
+
+    Scoring the trace would credit deliberation as a reply, and reasoning
+    models deliberate at length about exactly the vocabulary being scored.
+    """
+    from aiciv.experiment.prior_probe import _score_method, strip_reasoning
+
+    text = ("<think>I could hold everything constant and repeat each "
+            "combination several times to compare them</think>"
+            "Just plant things and see.")
+    assert strip_reasoning(text) == "Just plant things and see."
+    _, score = _score_method(text)
+    assert score == 0.0
+
+
+def test_unterminated_reasoning_yields_no_answer():
+    """Running out of tokens mid-thought means there IS no answer. Returning
+    the trace would be worse than returning nothing."""
+    from aiciv.experiment.prior_probe import strip_reasoning
+    assert strip_reasoning("<think>still weighing the options and") == ""
+
+
+def test_probe_records_truncation_rather_than_scoring_the_wreckage():
+    d = SyntheticDomain()
+    base = run_probe(d, lambda p: "<think>thinking about it", model="fake")
+    assert "TRUNCATED" in base.note
+    assert base.recall_ratio is None
+    assert not base.controlled_comparison_is_latent
+
+
+def test_json_is_extracted_from_after_a_reasoning_block():
+    from aiciv.experiment.prior_probe import _extract_json
+    got = _extract_json('<think>hmm</think>```json\n{"choice": {"spacing": 4}}\n```')
+    assert got == {"choice": {"spacing": 4}}
+
+
+# --- transport failures must not escape as tracebacks ---------------------
+
+def test_every_transport_failure_becomes_an_ollama_error():
+    """A socket read timeout is NOT a URLError, so it used to escape as a bare
+    TimeoutError and the caller's graceful handling never fired: the operator
+    got a traceback instead of "the model was too slow"."""
+    from aiciv.agents.policies.llm.policy import OllamaClient, OllamaError
+
+    unreachable = OllamaClient(model="x", host="http://127.0.0.1:59999",
+                               timeout=1.0)
+    with pytest.raises(OllamaError) as e:
+        unreachable.chat("a", "b", {})
+    assert "cannot reach Ollama" in str(e.value)
+
+
+def test_structured_output_is_opt_out_for_free_form_questions():
+    """The probe asks open questions. Forcing the ActionProposal schema onto
+    them would mangle the answers into a shape nobody asked for and then score
+    the model on the wreckage."""
+    import json as _json
+
+    from aiciv.agents.policies.llm.policy import OllamaClient
+
+    seen = {}
+
+    class Spy(OllamaClient):
+        def _payload(self, structured):
+            # exercise the same branch the real chat() takes
+            p = {"model": self.model, "stream": False}
+            if structured:
+                from aiciv.agents.policies.llm.prompts import schema_json
+                p["format"] = _json.loads(schema_json())
+            return p
+
+    spy = Spy(model="m")
+    assert "format" in spy._payload(True)
+    assert "format" not in spy._payload(False)

@@ -109,13 +109,36 @@ class PriorBaseline:
 
 
 def _score_method(text: str) -> tuple[dict[str, bool], float]:
-    low = (text or "").lower()
+    # Scored on the ANSWER, never on the reasoning trace: a model that muses
+    # "should I control for soil?" and then proposes nothing has not proposed
+    # a method.
+    low = strip_reasoning(text or "").lower()
     found = {k: any(re.search(p, low) for p in patterns)
              for k, patterns in METHOD_PATTERNS.items()}
     return found, round(sum(found.values()) / len(found), 4)
 
 
+#: Reasoning models wrap their working in these. The trace is not the answer,
+#: and scoring it would credit a model for method vocabulary it used while
+#: thinking rather than method it proposed.
+THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+OPEN_THINK_RE = re.compile(r"<think>.*", re.DOTALL | re.IGNORECASE)
+
+
+def strip_reasoning(text: str) -> str:
+    """Remove <think> blocks, including an unterminated one.
+
+    An unterminated block means the token budget ran out mid-thought, so there
+    is no answer at all -- returning the trace would be worse than returning
+    nothing, because the scorer would treat deliberation as a reply.
+    """
+    if not text:
+        return ""
+    return OPEN_THINK_RE.sub("", THINK_RE.sub("", text)).strip()
+
+
 def _extract_json(text: str) -> dict | None:
+    text = strip_reasoning(text)
     m = re.search(r"\{.*\}", text or "", re.DOTALL)
     if not m:
         return None
@@ -212,6 +235,9 @@ def run_probe(domain: Domain, ask, *, model: str, scaffold: str = "rules_only",
     # 3. Did it volunteer the method?
     markers, score = _score_method(answers["method"])
 
+    truncated = [k for k, v in answers.items()
+                 if "<think>" in (v or "") and "</think>" not in (v or "")]
+
     probe_id = blake2b_hex(model, domain.name, domain.version, scaffold,
                            prompt_version)
     return PriorBaseline(
@@ -229,7 +255,10 @@ def run_probe(domain: Domain, ask, *, model: str, scaffold: str = "rules_only",
         raw={k: v[:1500] for k, v in answers.items()},
         note=("The probe measures what the model SAYS when asked directly. "
               "That is a lower bound on latent knowledge, and therefore an "
-              "upper bound on the credit emergence may be assigned."),
+              "upper bound on the credit emergence may be assigned."
+              + (f" TRUNCATED (ran out of tokens mid-thought): {truncated}. "
+                 f"These tasks have no answer and their scores are not a "
+                 f"finding about the model." if truncated else "")),
     )
 
 

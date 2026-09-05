@@ -51,17 +51,26 @@ class OllamaClient:
     host: str = DEFAULT_HOST
     timeout: float = 120.0
 
-    def chat(self, system: str, user: str, options: dict) -> str:
+    def chat(self, system: str, user: str, options: dict,
+             *, structured: bool = True) -> str:
+        """Ask the model.
+
+        ``structured`` forces the ActionProposal schema, which is the
+        difference between a working 7B agent and a log full of parse
+        failures. It must be OFF for anything that is not an action -- the
+        prior probe asks free-form questions, and forcing the action schema
+        onto them would mangle the answers into a shape that is not what was
+        asked and then score the model on the wreckage.
+        """
         payload = {
             "model": self.model,
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": user}],
             "stream": False,
             "options": options,
-            # Structured outputs. The difference between a working 7B agent and
-            # a log full of parse failures.
-            "format": json.loads(schema_json()),
         }
+        if structured:
+            payload["format"] = json.loads(schema_json())
         req = urllib.request.Request(
             f"{self.host}/api/chat",
             data=json.dumps(payload).encode("utf-8"),
@@ -71,11 +80,39 @@ class OllamaClient:
                 body = json.loads(r.read().decode("utf-8"))
         except urllib.error.URLError as e:
             raise OllamaError(f"cannot reach Ollama at {self.host}: {e}") from e
+        except TimeoutError as e:
+            # A socket read timeout is NOT a URLError, so it escaped as a bare
+            # TimeoutError and the caller's graceful handling never fired -- the
+            # operator got a traceback instead of "the model was too slow".
+            raise OllamaError(
+                f"{self.model} did not answer within {self.timeout:.0f}s. "
+                f"Reasoning models spend most of their budget on <think> and "
+                f"can exceed this on a single call") from e
+        except OSError as e:
+            raise OllamaError(f"network error talking to {self.host}: {e}") from e
+        except json.JSONDecodeError as e:
+            raise OllamaError(f"{self.host} returned a non-JSON body: {e}") from e
         return body.get("message", {}).get("content", "")
 
 
 class ParseError(ValueError):
     pass
+
+
+def _classify(err: Exception) -> str:
+    """A coarse error class for the event log.
+
+    Coarse on purpose: the log says WHAT kind of failure, never where the
+    server is or what was sent to it.
+    """
+    text = str(err).lower()
+    if "did not answer within" in text or "timed out" in text:
+        return "timeout"
+    if "cannot reach" in text:
+        return "unreachable"
+    if "non-json" in text:
+        return "bad_response"
+    return "transport"
 
 
 def parse_action(text: str, param_space: dict[str, tuple]) -> ActionProposal:
@@ -136,13 +173,21 @@ class OllamaLLMPolicy:
 
     def __init__(self, model: str = DEFAULT_MODEL, host: str = DEFAULT_HOST,
                  scaffold: str = "rules_only", cache: LLMCache | None = None,
-                 temperature: float = 0.7) -> None:
-        self.client = OllamaClient(model=model, host=host)
+                 temperature: float = 0.7, timeout: float = 300.0) -> None:
+        # A generous per-call timeout. The agent prompt is far longer than a
+        # bare question, and a cold model swap costs tens of seconds on its own.
+        self.client = OllamaClient(model=model, host=host, timeout=timeout)
         self.scaffold = scaffold
         self.cache = cache
         self.temperature = temperature
         self.parse_failures = 0
+        self.transport_failures = 0
         self.calls = 0
+        #: One record per attempt, drained by the engine into the event log.
+        #: Deliberately carries NO host, URL, prompt or response text: a
+        #: degraded run must be diagnosable without the log becoming a place
+        #: connection details or model output accumulate.
+        self.call_log: list[dict[str, Any]] = []
         self.results: dict[tuple, list[float]] = defaultdict(list)
         self.pending: dict[int, tuple] = {}
         self.seen: set = set()
@@ -199,6 +244,8 @@ class OllamaLLMPolicy:
             blocks.append(summary)
         user = "\n\n".join(blocks)
 
+        import time
+
         for retry in range(MAX_RETRIES + 1):
             options = {
                 "temperature": self.temperature,
@@ -210,19 +257,44 @@ class OllamaLLMPolicy:
                 "num_predict": 400,
             }
             prompt = f"{self._system}\n---\n{user}\n(attempt {retry})"
+            started = time.perf_counter()
+
+            def _record(status: str, error_class: str | None = None) -> None:
+                self.call_log.append({
+                    "tick": ctx.tick, "agent_id": ctx.agent_id,
+                    "retry_index": retry, "call_status": status,
+                    "error_class": error_class,
+                    "latency_ms": int((time.perf_counter() - started) * 1000),
+                })
+
             try:
                 self.calls += 1
                 text = self._invoke(prompt, options, ctx, retry)
                 proposal = parse_action(text, ctx.param_space)
-            except ParseError:
+            except ParseError as e:
                 self.parse_failures += 1
+                _record("parse_failure", type(e).__name__)
                 continue
+            except OllamaError as e:
+                # A slow or unreachable model must cost this agent its day, not
+                # the whole run. Losing 400 ticks of accumulated evidence to one
+                # timeout would be far worse than losing one action, and the
+                # count is reported so a degraded run cannot be mistaken for a
+                # clean one.
+                self.transport_failures += 1
+                _record("transport_failure", _classify(e))
+                continue
+            _record("ok")
             self._remember_plant(proposal, ctx)
             return proposal
 
-        # Deterministic fallback. A model that cannot produce valid JSON after
-        # its retries loses the day, exactly as a malformed action would.
-        return ActionProposal(Verb.NOOP, {}, rationale="unparseable reply")
+        # Deterministic fallback. A model that cannot answer after its retries
+        # loses the day, exactly as a malformed action would.
+        return ActionProposal(Verb.NOOP, {}, rationale="no usable reply")
+
+    def drain_call_log(self) -> list[dict[str, Any]]:
+        out, self.call_log = self.call_log, []
+        return out
 
     def _invoke(self, prompt: str, options: dict, ctx, retry: int) -> str:
         if self.cache is None:
@@ -243,6 +315,16 @@ class OllamaLLMPolicy:
         self.pending[tile[1] * 20 + tile[0]] = cell
 
     def report(self) -> dict[str, Any]:
-        return {"calls": self.calls, "parse_failures": self.parse_failures,
-                "parse_failure_rate": (round(self.parse_failures / self.calls, 4)
-                                       if self.calls else None)}
+        return {
+            "calls": self.calls,
+            "parse_failures": self.parse_failures,
+            "transport_failures": self.transport_failures,
+            "parse_failure_rate": (round(self.parse_failures / self.calls, 4)
+                                   if self.calls else None),
+            # A run with a high transport failure rate is DEGRADED: those ticks
+            # are NOOPs the model never chose, and reporting it as a clean run
+            # would attribute the model's silence to its judgement.
+            "transport_failure_rate": (
+                round(self.transport_failures / self.calls, 4)
+                if self.calls else None),
+        }

@@ -434,6 +434,86 @@ day or soil would have been silently zeroed before this.
 
 ---
 
+## 4.7 Prior baselines — measured against live models, 2026-09-05
+
+`aiciv prior-probe`, synthetic domain, `rules_only` scaffold. Every number below
+is what the model said **cold**: no experience, no memory, no trials.
+
+| model | recall_ratio | named | prediction MAE | method score |
+|---|---:|---|---:|---:|
+| `assistant:latest` (Qwen2.5 7.6B) | 0.543 | CLOVER, spacing 3, water 4 | — (18 of 20 returned) | 0.20 |
+| `qwen2.5-coder:7b` | 0.543 | CLOVER, spacing 3, water 4 | **1.593** vs 1.518 baseline | 0.20 |
+
+Controllable optimum: mu 3.731. Both named recipes score mu 2.025.
+
+### The prediction result
+
+`qwen2.5-coder:7b` predicts **worse than the constant mean** (1.593 against a
+1.518 "always guess the average" baseline). It has no predictive model of this
+world whatsoever. That sets a clean floor for `CAN_PREDICT`: any in-run
+improvement over it is real, because the cold model carries no signal at all.
+
+### Why both models gave the identical answer
+
+They are both Qwen2.5-7B derivatives, so they share a base and therefore a folk
+prior. **Prior baselines are per model family, not per tag**, and two tags from
+one family do not constitute two independent measurements.
+
+### The confound, caught exactly where it was predicted
+
+`assistant:latest` justified its choice as:
+
+> *"Clover is known for its ability to fix nitrogen in the soil"*
+
+This is the case `agent_prior_knowledge.md` section 4 flags in advance. The
+model transferred a **true real-world fact** about clover and got the right
+companion for a reason having nothing to do with evidence in this world — then
+paired it with spacing 3, which is precisely where CLOVER is *worst* (-0.30 on
+the interaction surface).
+
+It has the ingredient and not the interaction. Recall 0.543 is far below the
+0.95 recall threshold, so **finding CLOVER at spacing 4-5 in-run would be
+genuine discovery beyond the baseline**, not recall.
+
+### Controlled comparison is NOT latent at this scaffold
+
+Neither model volunteered controls, replication, comparison or sample size.
+Only the `confounding` marker fired, on the word "soil". Both offered a version
+of *"experiment with different combinations and monitor plant health"*.
+
+So `controlled_comparison_is_latent = False` for this family, which means in-run
+protocol adoption would be a **meaningful signal** rather than a relabelling of
+something the model already had.
+
+State this carefully. The probe measures what a model **says when asked**, which
+is a lower bound on latent knowledge. It licenses *"the cold model did not
+volunteer controlled comparison"*. It does not license *"the model lacks it"*.
+
+### Expected-failure #1 did not occur
+
+The plan's most likely predicted outcome was that the probe would show the model
+already knowing most of it, reducing v0.1 to measuring recall. It does not:
+recall 0.54, prediction worse than chance, no volunteered method. Recorded here
+because a prediction that fails is worth as much as one that holds.
+
+---
+
+## 4.8 Wall clock — measured, and one model retired
+
+| model | latency | viable as an agent policy? |
+|---|---:|---|
+| `reasoner:latest` (Qwen3 8.2B) | **198.5 s** for a single one-sentence answer | **no** |
+
+At roughly 4000 calls per 400-tick run that is 222 hours — nine days for one
+run, before any arms or seeds. `reasoner:latest` is retired as an experiment
+arm on wall clock alone, regardless of how well it reasons.
+
+This is why the plan's expected-failure #7 needs deciding before Phase 8 rather
+than after: parallelise the DECIDE phase (safe, because every agent decides
+against the same frozen snapshot), cut ticks, or cut seeds.
+
+---
+
 ## 5. Known soft spot
 
 Uncontrolled trials reach only 0.393 power even at n=20. That is the intended

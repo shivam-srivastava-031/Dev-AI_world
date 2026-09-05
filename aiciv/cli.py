@@ -220,11 +220,22 @@ def cmd_prior_probe(args) -> int:
     from .experiment.prior_probe import run_probe, save
 
     domain = build_domain(args.domain, True)
-    client = OllamaClient(model=args.model, host=args.host)
+    # A generous default: the prediction task asks for twenty numbers, which
+    # is a long generation, and a reasoning model spends most of its budget
+    # thinking before it writes anything at all.
+    client = OllamaClient(model=args.model, host=args.host,
+                          timeout=args.timeout)
 
     def ask(prompt: str) -> str:
+        # structured=False: the probe asks open questions and must receive
+        # whatever the model would actually say. Two of the three tasks expect
+        # JSON of their own shape, and the third expects prose.
+        # Reasoning models spend most of their budget on <think>; 600 tokens
+        # left them deliberating with nothing to show for it.
         return client.chat("You are answering questions about farming.",
-                           prompt, {"temperature": 0.2, "num_predict": 500})
+                           prompt,
+                           {"temperature": 0.2, "num_predict": args.max_tokens},
+                           structured=False)
 
     try:
         baseline = run_probe(domain, ask, model=args.model,
@@ -292,6 +303,11 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("--host", default="http://127.0.0.1:11434")
     pp.add_argument("--domain", default="synthetic", choices=sorted(DOMAINS))
     pp.add_argument("--scaffold", default="rules_only")
+    pp.add_argument("--timeout", type=float, default=300.0,
+                    help="seconds per call")
+    pp.add_argument("--max-tokens", type=int, default=600,
+                    help="raise for reasoning models: <think> "
+                         "traces consume the budget before the answer")
     pp.set_defaults(func=cmd_prior_probe)
 
     args = p.parse_args(argv)
