@@ -58,6 +58,18 @@ class Domain(ABC):
     def param_space(self) -> Mapping[str, ParamSpec]:
         """Public: what an agent is allowed to vary. Not what any of it does."""
 
+    #: Axes a factorial search should cross. PUBLIC metadata: it names
+    #: parameters an agent can already see, and says nothing about what any
+    #: setting does or where the optimum lies.
+    sweep_axes: tuple[str, ...] = ()
+
+    #: The axis the crop_health hint speaks to, so a policy knows which
+    #: parameter that feedback is about. Again public: the hint itself is.
+    calibration_axis: str = ""
+
+    #: The axis set by WHEN an agent acts rather than by choice.
+    schedule_axis: str = "plant_day"
+
     @abstractmethod
     def true_mu(self, recipe: Mapping[str, Any], tile: TileContext, skill: float) -> float:
         """HIDDEN + METRICS_ONLY: the noiseless expected yield."""

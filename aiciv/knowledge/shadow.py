@@ -41,7 +41,8 @@ from ..spec import VerificationSpec
 from .analysis import TestResult, benjamini_hochberg, welch
 from .claim import TechniqueSpec
 
-#: Parameters the shadow verifier will form hypotheses about.
+#: Fallback when no domain is supplied. Prefer passing the domain, so the
+#: scanner forms hypotheses about that world's actual parameters.
 SCANNED = ("companion", "spacing", "water")
 
 
@@ -75,8 +76,14 @@ def _split(rows: Sequence[dict]) -> tuple[list[dict], list[dict]]:
 
 
 class ShadowVerifier:
-    def __init__(self, spec: VerificationSpec) -> None:
+    def __init__(self, spec: VerificationSpec, domain=None) -> None:
         self.spec = spec
+        if domain is not None:
+            self.scanned = tuple(
+                n for n in sorted(domain.param_space)
+                if n != getattr(domain, "schedule_axis", "plant_day"))
+        else:
+            self.scanned = SCANNED
 
     def scan(self, rows: Sequence[dict]) -> list[ShadowFinding]:
         """What the evidence in this world would support, agents notwithstanding."""
@@ -85,7 +92,7 @@ class ShadowVerifier:
             return []
 
         candidates: list[ShadowFinding] = []
-        for var in SCANNED:
+        for var in self.scanned:
             levels = sorted({r[var] for r in early if var in r}, key=str)
             for i, a in enumerate(levels):
                 for b in levels:

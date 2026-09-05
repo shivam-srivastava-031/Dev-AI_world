@@ -302,6 +302,57 @@ on outcome, making source reliability endogenous rather than assigned.
 
 ---
 
+## 8.1 Knowledge -> capability -> technology
+
+Without this chain the project is a farming-statistics simulator: agents get
+better and better at measuring a fixed world and nothing they learn ever
+changes what is possible.
+
+```
+CONFIRMED claim -> Procedure -> (skill + inputs) -> Capability
+   -> BUILD -> Artifact (persists in the world)
+   -> the action space changes -> previously unreachable recipes become
+      attemptable -> Technology (transmissible)
+```
+
+Rules that keep it honest:
+
+- **A procedure can only be compiled from knowledge the world confirmed.**
+  Not from a belief, not from an assertion.
+- **Capability requires the procedure AND the practice AND the materials.**
+  Knowing how is necessary and not sufficient.
+- **The validator owns whether a build is allowed**, not the policy. A policy
+  that tries too early gets a hint back.
+- **An artifact is a place, not a rule change.** Its effect is local; standing
+  far from it does not help.
+- **Anyone benefits from it.** An agent who learned nothing about water still
+  gains from standing beside someone else's channel. That is what makes it
+  technology rather than a private skill.
+
+The v0.1 slice is irrigation, deliberately small and complete rather than broad
+and notional. The gate is precise: *an artifact built by one agent must
+measurably expand what a different agent can attempt.*
+
+---
+
+## 8.2 Domains
+
+Two hidden functions behind one interface, answering different questions.
+
+| | synthetic | agronomy |
+|---|---|---|
+| question | does the machinery work against ground truth we control? | does it work when the hidden function is real science? |
+| structure | deceptive: one-factor-at-a-time optimisation is trapped | largely separable, as real agronomy is |
+| forms | an authored interaction surface | reciprocal yield-density x FAO-33 water x Mitscherlich nitrogen |
+| role | proves verification, calibration and the deceptive-landscape gate | proves a discovery corresponds to an actual agronomic fact |
+
+A domain advertises PUBLIC metadata — which parameters exist, which two a
+search should cross, which one the health signal speaks to — so policies are
+domain-agnostic. That metadata names parameters an agent can already see; it
+says nothing about what any setting does or where the optimum lies.
+
+---
+
 ## 9. Reporting standards
 
 - Every verdict reports effect, 95% CI, adjusted p, Hedges' g and n. A p-value

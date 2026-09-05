@@ -46,6 +46,8 @@ class Observation:
     nearby_agents: list[dict[str, Any]]
     my_plots: list[dict[str, Any]] = field(default_factory=list)
     my_claims: list[dict[str, Any]] = field(default_factory=list)
+    visible_agents: list[dict[str, Any]] = field(default_factory=list)
+    beliefs: list[dict[str, Any]] = field(default_factory=list)
     public_claims: list[dict[str, Any]] = field(default_factory=list)
     last_action_result: dict[str, Any] | None = None
     recent_harvests: list[dict[str, Any]] = field(default_factory=list)
@@ -61,6 +63,8 @@ def build_observation(
     *,
     known_soil: dict[int, int] | None = None,
     my_claims: list[dict[str, Any]] | None = None,
+    beliefs: list[dict[str, Any]] | None = None,
+    sight_radius: int = 5,
     public_claims: list[dict[str, Any]] | None = None,
     last_result: dict[str, Any] | None = None,
     recent_harvests: list[dict[str, Any]] | None = None,
@@ -111,6 +115,19 @@ def build_observation(
             "planted_tick": crop.planted_tick,
         })
 
+    # You can see people further than you can talk to them. PUBLIC: another
+    # agent's position is not privileged information.
+    visible = []
+    for other_id in state.agent_ids():
+        if int(other_id) == int(agent_id):
+            continue
+        o = state.agents[other_id]
+        d = max(abs(o.x - agent.x), abs(o.y - agent.y))
+        if d <= sight_radius:
+            visible.append({"agent_id": int(other_id), "name": o.name,
+                            "tile": [o.x, o.y], "distance": d})
+    visible.sort(key=lambda v: (v["distance"], v["agent_id"]))
+
     obs = Observation(
         tick=state.tick,
         day_of_cycle=state.day_of_cycle,
@@ -125,6 +142,8 @@ def build_observation(
         nearby_agents=others,
         my_plots=my_plots,
         my_claims=list(my_claims or []),
+        visible_agents=visible,
+        beliefs=list(beliefs or []),
         public_claims=list(public_claims or []),
         last_action_result=last_result,
         recent_harvests=list(recent_harvests or []),

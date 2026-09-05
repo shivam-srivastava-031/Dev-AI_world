@@ -1,36 +1,35 @@
 """Command line entry point.
 
-Only the subcommands whose phase has landed are implemented. The rest name the
-phase that will provide them rather than failing with a stack trace, so the
-gap between the plan and the code stays visible.
+Every subcommand here is implemented. Where a capability is genuinely absent --
+no model server, say -- the command says so plainly rather than failing with a
+stack trace or, worse, quietly producing something that looks like a result.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import pathlib
 import platform
 import subprocess
 import sys
 from collections import Counter
+from typing import Any
 
-from . import __name__ as _pkg  # noqa: F401
 from .config import RunConfig
-from .world.domains.synthetic import SyntheticDomain
 from .knowledge.shadow import ShadowVerifier, adoption_metrics
 from .metrics.adoption import adoption_report
-from .world.engine import Engine
+from .metrics.definitions import civilization_report
+from .persistence.replay import replay_actions
+from .persistence.store import RunStore
+from .world.domains.agronomy import AgronomyDomain
+from .world.domains.synthetic import SyntheticDomain
 
-NOT_YET = {
-    "replay": "Phase 1 (persistence) -- needs the SQLite action log",
-    "experiment": "Phase 8 -- needs arms and the paired-seed runner",
-    "metrics": "Phase 5 -- needs the metrics package",
-    "compare": "Phase 8 -- needs the bootstrap comparison",
-    "prior-probe": "Phase 7 -- needs the Ollama policy",
-}
+RUNS = pathlib.Path("runs")
+DOMAINS = {"synthetic": SyntheticDomain, "agronomy": AgronomyDomain}
 
 
-def _git_commit() -> tuple[str, bool]:
+def _git() -> tuple[str, bool]:
     try:
         c = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
                            text=True, timeout=5)
@@ -42,74 +41,47 @@ def _git_commit() -> tuple[str, bool]:
 
 
 def build_domain(name: str, water_hint: bool):
-    if name == "synthetic":
-        return SyntheticDomain(water_hint=water_hint)
-    raise SystemExit(f"unknown domain {name!r} (agronomy lands in Phase 6)")
+    if name not in DOMAINS:
+        raise SystemExit(f"unknown domain {name!r}; have {sorted(DOMAINS)}")
+    return DOMAINS[name](water_hint=water_hint)
 
 
-def manifest(cfg: RunConfig, domain, engine: Engine) -> dict:
+def manifest(cfg: RunConfig, domain, engine) -> dict[str, Any]:
     """Everything needed to reproduce this run months from now."""
-    commit, dirty = _git_commit()
+    commit, dirty = _git()
+    lexicon = getattr(engine, "_lexicon", None)
     return {
-        "git_commit": commit,
-        "dirty": dirty,
-        "config_hash": cfg.hash,
-        "code_version": "0.1.0",
-        "domain": domain.name,
-        "domain_version": domain.version,
+        "git_commit": commit, "dirty": dirty,
+        "config_hash": cfg.hash, "code_version": "0.1.0",
+        "domain": domain.name, "domain_version": domain.version,
         "verification_spec_hash": domain.verification.hash,
         "verification_calibrated_by": domain.verification.calibrated_by,
-        "seed": cfg.seed,
-        "ticks": cfg.ticks,
-        "agents": cfg.n_agents,
-        "policy": cfg.policy,
-        "scaffold_level": cfg.scaffold_level,
-        "teaching_enabled": cfg.teaching_enabled,
-        "water_hint": cfg.water_hint,
-        "arm": cfg.arm,
-        "python": platform.python_version(),
-        # prior_probe_id and lexicon_hash are added when Phases 5 and 7 land.
+        "lexicon_hash": lexicon.hash if lexicon else None,
         "prior_probe_id": None,
-        "lexicon_hash": None,
+        "seed": cfg.seed, "ticks": cfg.ticks, "agents": cfg.n_agents,
+        "policy": cfg.policy, "scaffold_level": cfg.scaffold_level,
+        "teaching_enabled": cfg.teaching_enabled, "water_hint": cfg.water_hint,
+        "arm": cfg.arm, "python": platform.python_version(),
     }
 
 
-def cmd_run(args: argparse.Namespace) -> int:
-    import aiciv.agents.policies.random_policy  # noqa: F401  registers
-    import aiciv.agents.policies.scripted  # noqa: F401  registers
+# --- run -------------------------------------------------------------------
+
+def cmd_run(args) -> int:
+    import aiciv.agents.policies  # noqa: F401  registers every policy
+    from .world.engine import Engine
 
     cfg = RunConfig(
         seed=args.seed, ticks=args.ticks, n_agents=args.agents,
-        policy=args.policy, domain=args.domain, water_hint=not args.no_water_hint,
-        teaching_enabled=not args.no_teaching, arm=args.arm,
-    )
+        policy=args.policy, domain=args.domain,
+        water_hint=not args.no_water_hint,
+        teaching_enabled=not args.no_teaching, arm=args.arm)
     domain = build_domain(args.domain, cfg.water_hint)
     engine = Engine(cfg, domain)
     engine.run()
 
-    hashes = engine.hash_sequence()
-    strata = Counter(t.stratum for t in engine.trials)
+    report = civilization_report(engine, domain)
 
-    # What the civilization actually banked as public knowledge.
-    claims = []
-    for r in sorted(engine.kb, key=lambda r: str(r.claim.claim_id)):
-        row = r.summary()
-        v = r.verdicts.get("supported", {})
-        row["effect"] = v.get("effect")
-        row["ci"] = ([v.get("ci_low"), v.get("ci_high")]
-                     if v.get("ci_low") is not None else None)
-        row["p_value"] = v.get("p_value")
-        row["hedges_g"] = v.get("hedges_g")
-        row["n"] = ([v.get("n_treat"), v.get("n_ctrl")]
-                    if v.get("n_treat") is not None else None)
-        row["reason"] = v.get("reason")
-        claims.append(row)
-
-    # The shadow verifier measures what the EVIDENCE supports, whether or not
-    # any agent filed paperwork. Its ratio to agent-confirmed claims is
-    # protocol adoption -- a finding, not an assumption.
-    # Adoption graded on each agent's own information state: an agent that
-    # never had a formulable comparison is excluded, not scored zero.
     rows_by_agent: dict[int, list[dict]] = {}
     for row in engine.rows():
         rows_by_agent.setdefault(int(row["agent_id"]), []).append(row)
@@ -117,41 +89,160 @@ def cmd_run(args: argparse.Namespace) -> int:
     for r in engine.kb:
         if r.registered_tick is not None:
             claims_by_agent.setdefault(int(r.claim.author), []).append(r.claim)
-    adoption = adoption_report(rows_by_agent, claims_by_agent)
+    report["adoption"] = adoption_report(rows_by_agent, claims_by_agent)
 
-    shadow = ShadowVerifier(domain.verification)
+    shadow = ShadowVerifier(domain.verification, domain)
     findings = shadow.scan(engine.rows())
-    shadow_confirmed = sum(1 for f in findings if f.stage == "confirmed")
-    agent_confirmed = sum(
-        1 for r in engine.kb
-        if r.state.value in ("confirmed", "generalized"))
+    report["shadow"] = {
+        **adoption_metrics(
+            sum(1 for r in engine.kb
+                if r.state.value in ("confirmed", "generalized")),
+            sum(1 for f in findings if f.stage == "confirmed")),
+        "findings": [f.describe() for f in findings],
+        "caveat": ("the shadow scanner forms marginal single-variable "
+                   "hypotheses only, so its count is not like-for-like with "
+                   "agent claims; see knowledge/shadow.py"),
+    }
+    report["capabilities"] = {
+        k: v for k, v in engine.capabilities.report().items() if k != "events"}
+
+    run_id = args.run_id or f"{cfg.arm}_s{cfg.seed}_{cfg.policy}"
+    if not args.no_save:
+        store = RunStore(RUNS / f"{run_id}.sqlite")
+        store.save_run(run_id, engine,
+                       manifest=manifest(cfg, domain, engine), metrics=report)
+        store.close()
+
+    hashes = engine.hash_sequence()
     out = {
+        "run_id": run_id,
+        "saved": None if args.no_save else str(RUNS / f"{run_id}.sqlite"),
         "manifest": manifest(cfg, domain, engine),
         "final_state_hash": hashes[-1] if hashes else None,
-        "hash_sequence_digest": hashes[-1] if hashes else None,
         "trials": len(engine.trials),
-        "trials_by_stratum": dict(strata),
-        "events": len(engine.events),
+        "trials_by_stratum": dict(Counter(t.stratum for t in engine.trials)),
         "rejections": engine.rejection_summary(),
         "claim_states": {k: v for k, v in engine.kb.counts().items() if v},
-        "claims": claims,
-        "adoption": adoption,
-        "shadow": {
-            **adoption_metrics(agent_confirmed, shadow_confirmed),
-            "shadow_findings": [f.describe() for f in findings],
-        },
-        "agents": {
-            engine.state.agents[a].name: {
-                "skill": engine.state.agents[a].skill_farming,
-                "food": engine.state.agents[a].food,
-                "reputation": engine.state.agents[a].reputation,
-            }
-            for a in engine.state.agent_ids()
-        },
+        "metrics": report,
     }
-    print(json.dumps(out, indent=2))
+    print(json.dumps(out, indent=2, default=str))
     return 0
 
+
+# --- replay ----------------------------------------------------------------
+
+def cmd_replay(args) -> int:
+    path = (pathlib.Path(args.run) if args.run.endswith(".sqlite")
+            else RUNS / f"{args.run}.sqlite")
+    if not path.exists():
+        print(f"no such run file: {path}", file=sys.stderr)
+        return 1
+    run_id = path.stem
+    store = RunStore(path)
+    try:
+        if args.mode == "actions":
+            result = replay_actions(store, run_id)
+        else:
+            from .agents.policies.llm.cache import LLMCache
+            from .persistence.replay import replay_full
+            cache = LLMCache(path=RUNS / f"{run_id}_llm.sqlite", mode="replay")
+            result = replay_full(store, run_id, cache)
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0 if result.matched else 1
+    finally:
+        store.close()
+
+
+# --- metrics / experiments -------------------------------------------------
+
+def cmd_metrics(args) -> int:
+    path = RUNS / f"{args.run}.sqlite"
+    if not path.exists():
+        print(f"no such run: {path}", file=sys.stderr)
+        return 1
+    store = RunStore(path)
+    try:
+        report = store.metrics(args.run)
+        if report is None:
+            print("no metrics recorded for this run", file=sys.stderr)
+            return 1
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    finally:
+        store.close()
+
+
+def cmd_experiment(args) -> int:
+    from dataclasses import replace as dc_replace
+
+    from .experiment.runner import DEFAULT_ARMS, Experiment
+
+    arms = list(DEFAULT_ARMS)
+    if args.arms:
+        wanted = set(args.arms.split(","))
+        arms = [a for a in DEFAULT_ARMS if a.name in wanted]
+        missing = wanted - {a.name for a in arms}
+        if missing:
+            raise SystemExit(f"unknown arms: {sorted(missing)}")
+
+    exp = Experiment(
+        name=args.name,
+        arms=[dc_replace(a, domain=args.domain) for a in arms],
+        seeds=[int(s) for s in args.seeds.split(",")],
+        ticks=args.ticks, n_agents=args.agents, out_dir=RUNS)
+
+    def progress(arm: str, seed: int) -> None:
+        print(f"  {arm} seed {seed} ...", file=sys.stderr, flush=True)
+
+    print(f"running {len(exp.arms)} arms x {len(exp.seeds)} seeds "
+          f"x {exp.ticks} ticks", file=sys.stderr)
+    report = exp.report(exp.run(progress=progress))
+    path = exp.save(report)
+    print(json.dumps(report, indent=2, default=str))
+    print(f"\nsaved {path}", file=sys.stderr)
+    return 0
+
+
+def cmd_compare(args) -> int:
+    path = RUNS / f"experiment_{args.experiment}.json"
+    if not path.exists():
+        print(f"no such experiment report: {path}", file=sys.stderr)
+        return 1
+    report = json.loads(path.read_text(encoding="utf-8"))
+    print(json.dumps(report.get("contrasts", {}), indent=2))
+    return 0
+
+
+# --- prior probe -----------------------------------------------------------
+
+def cmd_prior_probe(args) -> int:
+    from .agents.policies.llm.policy import OllamaClient, OllamaError
+    from .experiment.prior_probe import run_probe, save
+
+    domain = build_domain(args.domain, True)
+    client = OllamaClient(model=args.model, host=args.host)
+
+    def ask(prompt: str) -> str:
+        return client.chat("You are answering questions about farming.",
+                           prompt, {"temperature": 0.2, "num_predict": 500})
+
+    try:
+        baseline = run_probe(domain, ask, model=args.model,
+                             scaffold=args.scaffold)
+    except OllamaError as e:
+        print(f"cannot reach a model: {e}", file=sys.stderr)
+        print("The prior probe needs a running Ollama. Without it we cannot say "
+              "what the model already knew, and discovery counts from any run "
+              "would be uninterpretable.", file=sys.stderr)
+        return 1
+
+    path = save(baseline, RUNS / "priors")
+    print(json.dumps(baseline.to_dict(), indent=2))
+    print(f"\nsaved {path}", file=sys.stderr)
+    return 0
+
+
+# --- entry point -----------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="aiciv", description=__doc__)
@@ -159,21 +250,49 @@ def main(argv: list[str] | None = None) -> int:
 
     r = sub.add_parser("run", help="run a simulation headlessly")
     r.add_argument("--seed", type=int, default=42)
-    r.add_argument("--ticks", type=int, default=400)
+    r.add_argument("--ticks", type=int, default=1200)
     r.add_argument("--agents", type=int, default=5)
-    r.add_argument("--policy", default="random")
-    r.add_argument("--domain", default="synthetic")
+    r.add_argument("--policy", default="scripted_factorial")
+    r.add_argument("--domain", default="synthetic", choices=sorted(DOMAINS))
+    r.add_argument("--run-id", default=None)
     r.add_argument("--no-water-hint", action="store_true",
-                   help="ablation: remove the crop_health water signal")
+                   help="ablation: remove the crop_health signal")
     r.add_argument("--no-teaching", action="store_true",
                    help="control arm: TEACH is rejected")
+    r.add_argument("--no-save", action="store_true")
     r.add_argument("--arm", default="default")
     r.set_defaults(func=cmd_run)
 
-    for name, phase in NOT_YET.items():
-        s = sub.add_parser(name, help=f"not yet implemented -- {phase}")
-        s.set_defaults(func=lambda a, _n=name, _p=phase: (
-            print(f"'aiciv {_n}' is not implemented yet: {_p}", file=sys.stderr) or 1))
+    rp = sub.add_parser("replay", help="re-execute a recorded run and verify it")
+    rp.add_argument("--run", required=True)
+    rp.add_argument("--mode", default="actions", choices=["actions", "full"])
+    rp.set_defaults(func=cmd_replay)
+
+    m = sub.add_parser("metrics", help="print the recorded metrics for a run")
+    m.add_argument("--run", required=True)
+    m.set_defaults(func=cmd_metrics)
+
+    e = sub.add_parser("experiment", help="run arms x paired seeds")
+    e.add_argument("--name", default="transfer")
+    e.add_argument("--arms", default=None,
+                   help="comma-separated subset of the default arms")
+    e.add_argument("--seeds", default="42,43,44")
+    e.add_argument("--ticks", type=int, default=1200)
+    e.add_argument("--agents", type=int, default=5)
+    e.add_argument("--domain", default="synthetic", choices=sorted(DOMAINS))
+    e.set_defaults(func=cmd_experiment)
+
+    c = sub.add_parser("compare", help="print the contrasts from an experiment")
+    c.add_argument("--experiment", required=True)
+    c.set_defaults(func=cmd_compare)
+
+    pp = sub.add_parser("prior-probe",
+                        help="measure what a model knows BEFORE it farms")
+    pp.add_argument("--model", default="assistant:latest")
+    pp.add_argument("--host", default="http://127.0.0.1:11434")
+    pp.add_argument("--domain", default="synthetic", choices=sorted(DOMAINS))
+    pp.add_argument("--scaffold", default="rules_only")
+    pp.set_defaults(func=cmd_prior_probe)
 
     args = p.parse_args(argv)
     return args.func(args)

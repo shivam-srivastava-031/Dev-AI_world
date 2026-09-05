@@ -65,6 +65,8 @@ def water_opt(spacing: int) -> float:
 class SyntheticDomain(Domain):
     name = "synthetic"
     version = "0.1"
+    sweep_axes = ("companion", "spacing")
+    calibration_axis = "water"
 
     verification = VerificationSpec(
         min_trials_per_group=16,       # calibrated: see docs/statistics.md

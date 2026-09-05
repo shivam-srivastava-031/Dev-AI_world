@@ -58,12 +58,15 @@ class RandomPolicy:
                      and len(obs.plots) < ctx.config.max_concurrent_plots)
         if can_plant and rng.random() < 0.7:
             tile = free[int(rng.integers(0, len(free)))]
-            return ActionProposal(Verb.PLANT, {
-                "tile": list(tile),
-                "spacing": int(rng.integers(1, 6)),
-                "water": int(rng.integers(0, 5)),
-                "companion": COMPANIONS[int(rng.integers(0, len(COMPANIONS)))],
-            })
+            # Built from the domain's advertised parameter space, so this floor
+            # policy works in any world rather than only the one it was written
+            # against.
+            params = {"tile": list(tile)}
+            for name, values in ctx.param_space.items():
+                if name == ctx.schedule_axis:
+                    continue           # set by when you act, not by choice
+                params[name] = values[int(rng.integers(0, len(values)))]
+            return ActionProposal(Verb.PLANT, params)
 
         arable = [t["tile"] for t in obs.nearby_tiles
                   if t["terrain"] == "arable" and t["tile"] != [obs.x, obs.y]]

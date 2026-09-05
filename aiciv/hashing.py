@@ -64,8 +64,26 @@ def _canon(obj: Any) -> Any:
 
 
 def canonical_json(obj: Any) -> str:
-    """Deterministic JSON: sorted keys, no whitespace, quantised floats."""
+    """Deterministic JSON for HASHING: sorted keys, quantised floats.
+
+    LOSSY ON PURPOSE. Floats become fixed-width strings, which is exactly
+    what makes a hash stable across BLAS versions -- and exactly what makes
+    this unsuitable for anything that will be read back. Use
+    ``stable_json`` to persist a value you intend to load again.
+    """
     return json.dumps(_canon(obj), separators=(",", ":"), ensure_ascii=True)
+
+
+def stable_json(obj: Any) -> str:
+    """Deterministic JSON that ROUND-TRIPS: sorted keys, types preserved.
+
+    Serialising an action payload with canonical_json turned min_delta=0.3
+    into the string "0.300", so replaying the run rejected the claim as
+    having a non-positive delta and the world quietly diverged. Ordering is
+    still deterministic; only the lossy float handling is gone.
+    """
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True, default=str)
 
 
 def blake2b_hex(*parts: Any, digest_size: int = 16) -> str:

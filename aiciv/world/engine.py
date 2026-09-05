@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..agents.observation import build_observation
+from ..agents import policies as _policies  # noqa: F401  registers all
 from ..agents.policy import PolicyContext, build_policy
 from ..config import REGISTER_COST, RunConfig
 from ..ids import AgentId
@@ -30,6 +31,9 @@ from ..knowledge.causal import validate_adjustment_set
 from ..knowledge.kb import KnowledgeBase
 from ..knowledge.trials import Trial
 from ..knowledge.verifier import Verifier
+from ..capabilities.procedure import CAPABILITIES, CapabilityRegistry
+from ..civilization.trust import BeliefStatus, Beliefs, Relationships
+from ..language.gate import LanguageGate, NoveltyLog
 from ..rng import derive_rng
 from .actions import ActionProposal, Rejection, RejectionCode, Verb
 from .domains.base import Domain
@@ -65,7 +69,10 @@ class Engine:
     last_result: dict[int, dict[str, Any]] = field(default_factory=dict)
     recent_harvests: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
     inbox: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
-    beliefs: dict[int, dict[str, dict[str, Any]]] = field(default_factory=dict)
+    beliefs: dict[int, Beliefs] = field(default_factory=dict)
+    relationships: Relationships = field(default_factory=Relationships)
+    novelty: NoveltyLog = field(default_factory=NoveltyLog)
+    capabilities: CapabilityRegistry = field(default_factory=CapabilityRegistry)
     trials_by_id: dict[int, Trial] = field(default_factory=dict)
     _rows_cache: list[dict] = field(default_factory=list)
 
@@ -77,6 +84,9 @@ class Engine:
         self.state = initial_state(self.config)
         if self.verifier is None:
             self.verifier = Verifier(self.domain.verification, self.kb.log)
+        if self.language_gate is None:
+            self._lexicon = LanguageGate()
+            self.language_gate = self._lexicon.as_validator()
         # The secret never leaves this process except into the runs table. It is
         # what makes a trial row unforgeable even with write access to the DB.
         self.run_secret = secrets.token_bytes(32)
@@ -86,7 +96,7 @@ class Engine:
             self.last_result[int(aid)] = {}
             self.recent_harvests[int(aid)] = []
             self.inbox[int(aid)] = []
-            self.beliefs[int(aid)] = {}
+            self.beliefs[int(aid)] = Beliefs()
 
     # ---- the loop ---------------------------------------------------------
 
@@ -111,6 +121,7 @@ class Engine:
                 messages=self.inbox[a][-5:],
                 my_claims=[r.summary() for r in self.kb
                            if int(r.claim.author) == a],
+                beliefs=[b.to_dict() for b in self.beliefs[a].all()],
                 public_claims=[r.summary() for r in self.kb
                                if int(r.claim.author) != a
                                and r.state.value in ('supported',
@@ -122,6 +133,9 @@ class Engine:
                 rng=derive_rng(self.config.seed, "policy", t, a),
                 config=self.config,
                 param_space={k: v.values for k, v in self.domain.param_space.items()},
+                sweep_axes=self.domain.sweep_axes,
+                calibration_axis=self.domain.calibration_axis,
+                schedule_axis=self.domain.schedule_axis,
             )
             proposals.append((a, self.policies[a].decide(obs, ctx)))
 
@@ -134,7 +148,8 @@ class Engine:
         for a, proposal in proposals:
             verdict = validate(proposal, AgentId(a), snapshot, self.domain,
                                language_gate=self.language_gate,
-                               claimed_tiles=claimed)
+                               claimed_tiles=claimed,
+                               capabilities=self.capabilities)
             if isinstance(verdict, Rejection):
                 rejections.append((a, verdict))
                 # A rejection teaches: it lands in memory and is shown next tick.
@@ -165,7 +180,10 @@ class Engine:
             self.last_result[a] = {"ok": True, "action": proposal.verb.value}
 
             for e in evs:
-                if e.kind == "inspect":
+                if e.kind == "build_channel":
+                    self.capabilities.build(agent=a, tile_id=e.payload["tile_id"],
+                                            tick=t)
+                elif e.kind == "inspect":
                     self.known_soil[a][e.payload["tile_id"]] = e.payload["soil_band"]
                 elif e.kind == "harvest":
                     self.recent_harvests[a].append(e.payload)
@@ -182,6 +200,9 @@ class Engine:
             self.verifier.run_round(
                 self.kb, lambda rec: self.rows(), t,
                 self.run_secret, self.trials_by_id)
+
+        self._update_beliefs(tick_trials, t)
+        self._update_capabilities(t)
 
         # 12. UPKEEP
         tick_events.extend(upkeep(state))
@@ -219,9 +240,8 @@ EPISTEMIC_VERBS = frozenset({
 
 def _rows(self) -> list[dict]:
     """Trial rows for the verifier. Rebuilt only when new evidence lands."""
-    from dataclasses import asdict
     if len(self._rows_cache) != len(self.trials):
-        self._rows_cache = [asdict(t) for t in self.trials]
+        self._rows_cache = [t.flat() for t in self.trials]
     return self._rows_cache
 
 
@@ -308,11 +328,9 @@ def _handle_epistemic(self, agent, proposal, tick):
         # Knowledge transfers; competence does not. No skill changes hands and
         # no world state moves -- the student receives a belief marked hearsay
         # and must run its own trials to upgrade it.
-        self.beliefs[target][str(cid)] = {
-            "claim_id": str(cid), "belief": 0.5, "source": agent,
-            "status": "hearsay", "personal_trials": 0,
-            "world_status": rec.state.value,
-        }
+        self.beliefs[target].learn(str(cid), source=agent, tick=tick,
+                                   world_status=rec.state.value)
+        self.relationships.record_teach(agent, target)
         kb.record_teach(tick, AgentId(target), cid)
         return None
 
@@ -321,3 +339,71 @@ def _handle_epistemic(self, agent, proposal, tick):
 
 Engine.rows = _rows
 Engine.handle_epistemic = _handle_epistemic
+
+def _update_beliefs(self, new_trials, tick: int) -> None:
+    """Fold an agent's own harvests into its beliefs, then settle trust.
+
+    Teaching gives a student a claim as hearsay. Only the student's OWN trials
+    can move it to personally_confirmed or personally_refuted, which is what
+    keeps "knowledge transferred" separate from "competence transferred".
+    """
+    if not new_trials:
+        return
+
+    for trial in new_trials:
+        agent = int(trial.agent_id)
+        row = trial.flat()
+        held = self.beliefs[agent]
+        for rec in self.kb:
+            cid = str(rec.claim.claim_id)
+            belief = held.get(cid)
+            # Only track claims the agent actually holds or authored; an agent
+            # is not silently accumulating opinions about everything.
+            if belief is None and int(rec.claim.author) != agent:
+                continue
+            in_treat = rec.claim.spec.matches(row)
+            if not in_treat and not rec.claim.baseline.matches(row):
+                continue
+            before = belief.status if belief else BeliefStatus.NONE
+            b = held.observe(cid, in_treat=in_treat,
+                             yield_kg=float(row["yield_kg"]), tick=tick)
+            b.world_status = rec.state.value
+            if (before in (BeliefStatus.NONE, BeliefStatus.HEARSAY)
+                    and b.status in (BeliefStatus.PERSONALLY_CONFIRMED,
+                                     BeliefStatus.PERSONALLY_REFUTED)
+                    and b.source is not None):
+                self.relationships.settle(
+                    agent, b.source,
+                    confirmed=b.status is BeliefStatus.PERSONALLY_CONFIRMED)
+
+
+Engine._update_beliefs = _update_beliefs
+
+def _update_capabilities(self, tick: int) -> None:
+    """Confirmed knowledge becomes a procedure, and a procedure plus practice
+    becomes a capability.
+
+    Not a reward for good behaviour: it is the mechanical consequence of the
+    world now knowing something. The agent still needs the skill and the
+    materials before it can act on it.
+    """
+    for rec in self.kb:
+        if rec.state.value not in ("confirmed", "generalized"):
+            continue
+        proc = self.capabilities.compile_procedure(rec.claim, tick)
+        if proc is None:
+            continue
+        spec = CAPABILITIES[proc.capability]
+        # The author holds it, and so does anyone who personally confirmed it:
+        # a procedure travels with the knowledge, not with the person.
+        holders = {int(rec.claim.author)}
+        for a in self.state.agent_ids():
+            b = self.beliefs[int(a)].get(str(rec.claim.claim_id))
+            if b is not None and b.status is BeliefStatus.PERSONALLY_CONFIRMED:
+                holders.add(int(a))
+        for agent in sorted(holders):
+            if self.state.agents[AgentId(agent)].skill_farming >= spec.min_skill:
+                self.capabilities.grant(agent, proc.capability, tick)
+
+
+Engine._update_capabilities = _update_capabilities

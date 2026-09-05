@@ -47,6 +47,10 @@ COVARIATE_CLASS: dict[str, CovariateClass] = {
     "spacing": CovariateClass.TREATMENT,
     "water": CovariateClass.TREATMENT,
     "companion": CovariateClass.TREATMENT,
+    "density": CovariateClass.TREATMENT,
+    "irrigation": CovariateClass.TREATMENT,
+    "nitrogen": CovariateClass.TREATMENT,
+    "params": CovariateClass.TREATMENT,
 
     # --- affected by the treatment -----------------------------------------
     # Pre-treatment for one trial, treatment-affected across a sequence. See
@@ -76,8 +80,31 @@ DEFAULT_COMPARISON_COVARIATES = ("soil_band", "water", "plant_day", "skill_at_pl
 DEFAULT_CAUSAL_COVARIATES = ("soil_band", "plant_day")
 
 
+#: Domain parameters not listed explicitly are TREATMENT: they are the thing
+#: the agent varied. The schedule axis is the exception -- it is fixed by when
+#: the agent acted, so it is pre-treatment.
+SCHEDULE_AXES = frozenset({"plant_day"})
+
+
 def classify(field: str) -> CovariateClass | None:
-    return COVARIATE_CLASS.get(field)
+    known = COVARIATE_CLASS.get(field)
+    if known is not None:
+        return known
+    if field in SCHEDULE_AXES:
+        return CovariateClass.PRE_TREATMENT
+    return None
+
+
+def classify_for_domain(field: str, domain) -> CovariateClass | None:
+    """Classification that knows the domain's own parameter names."""
+    known = classify(field)
+    if known is not None:
+        return known
+    if field in getattr(domain, "param_space", {}):
+        return (CovariateClass.PRE_TREATMENT
+                if field == getattr(domain, "schedule_axis", "")
+                else CovariateClass.TREATMENT)
+    return None
 
 
 def validate_adjustment_set(

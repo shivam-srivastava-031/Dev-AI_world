@@ -66,14 +66,11 @@ def execute(
     elif verb is Verb.PLANT:
         tid = _tile(state, proposal)
         tile = state.grid.by_id(tid)
-        recipe = {
-            "spacing": int(proposal.params["spacing"]),
-            "water": int(proposal.params["water"]),
-            "companion": str(proposal.params["companion"]),
-            "plant_day": state.day_of_cycle,
-        }
+        from .validator import plant_params, water_cost
+        recipe = {k: proposal.params[k] for k in plant_params(domain)}
+        recipe[domain.schedule_axis] = state.day_of_cycle
         agent.seeds -= 1
-        agent.water_stock -= recipe["water"]
+        agent.water_stock -= water_cost(domain, proposal.params)
         agent.plots.add(tid)
         state.crops[tid] = Crop(
             tile_id=tid, planter=agent_id, recipe=recipe,
@@ -82,6 +79,11 @@ def execute(
         # skill_at_plant is stamped now: PRE_TREATMENT for this trial.
         state.crops[tid].recipe["_skill_at_plant"] = q(agent.skill_farming)
         ev("plant", tile_id=int(tid), **recipe)
+
+    elif verb is Verb.BUILD_CHANNEL:
+        tid = _tile(state, proposal)
+        agent.seeds -= 2
+        ev("build_channel", tile_id=int(tid))
 
     elif verb is Verb.TEND:
         ev("tend", tile_id=int(_tile(state, proposal)))

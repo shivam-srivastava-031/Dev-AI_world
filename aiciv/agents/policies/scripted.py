@@ -1,42 +1,41 @@
 """Scripted control policies. Neither is given the hidden yield function.
 
-These are the arms that make an LLM result interpretable. Without them,
-"the LLM found the optimum" says nothing about whether reasoning was involved.
+These are the arms that make an LLM result interpretable. Without them, "the
+LLM found the optimum" says nothing about whether reasoning was involved.
 
   ScriptedGreedy    a competent but naive experimenter. Optimises one variable
                     at a time -- the most natural thing to do, and exactly what
-                    this landscape is built to punish. Converges on
-                    (spacing=3, MARIGOLD) and stops.
+                    a deceptive landscape punishes.
 
-  ScriptedFactorial sweeps companion x spacing as a full factorial. Finds the
-                    interaction, at a known and measurable trial cost.
+  ScriptedFactorial crosses the domain's two search axes as a full factorial.
+                    Finds interactions, at a known and measurable trial cost.
 
 Together they bracket any LLM policy. Scoring like Greedy means no advantage
 over naive method; scoring like Factorial at similar cost means brute force.
 Only beating Factorial's trials_to_first_confirmed indicates inference.
 
-Neither imports the domain. Both learn water from the PUBLIC crop_health
-signal, exactly as any agent would.
+Neither imports a domain. Both read the PUBLIC metadata the domain advertises
+through PolicyContext -- which parameters exist, which two are worth crossing,
+which one the crop_health signal speaks to -- and learn everything else from
+outcomes. That metadata names parameters an agent can already see; it says
+nothing about what any setting does or where the optimum lies.
 """
 
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Any
 
 from ...world.actions import ActionProposal, Verb
 from ..policy import PolicyContext, register
 
-COMPANIONS = ("NONE", "CLOVER", "BEANS", "MARIGOLD", "THISTLE")
-SPACINGS = (1, 2, 3, 4, 5)
-
 REPLICATES = 6          # cell-mean SE ~0.20 at sigma 0.50; 4 was too noisy to
                         # rank 25 cells and both policies picked the wrong one
 WATER_PROBES = 3        # crop_health is deterministic, so this converges fast
-POST_REG_TARGET = 20    # per arm, comfortably above min_trials_per_group
 
 
 class _ScriptedBase:
-    """Farming loop, water control, and per-agent bookkeeping.
+    """Farming loop, calibration control, and per-agent bookkeeping.
 
     The policy object persists across ticks, so it doubles as that agent's
     memory. Nothing here touches world state.
@@ -45,17 +44,45 @@ class _ScriptedBase:
     name = "scripted_base"
 
     def __init__(self) -> None:
-        self.water_pref: dict[int, int] = {s: 2 for s in SPACINGS}
-        self.water_done: dict[int, bool] = {s: False for s in SPACINGS}
-        self.water_tries: dict[int, int] = {s: 0 for s in SPACINGS}
-        self.results: dict[tuple[str, int], list[float]] = defaultdict(list)
-        self.post_reg: dict[tuple[str, int], int] = defaultdict(int)
-        self.pending: dict[int, tuple[str, int]] = {}
+        self.calib_pref: dict[Any, Any] = {}
+        self.calib_done: dict[Any, bool] = {}
+        self.calib_tries: dict[Any, int] = defaultdict(int)
+        self.results: dict[tuple, list[float]] = defaultdict(list)
+        self.post_reg: dict[tuple, int] = defaultdict(int)
+        self.pending: dict[int, tuple] = {}
         self.seen: set = set()
         self.claim_id: str | None = None
         self.registered = False
-        self.registered_tick: int | None = None
         self.trials_run = 0
+        self._axes: tuple[str, str] | None = None
+
+    # -- domain metadata, read once from the context -----------------------
+
+    def _setup(self, ctx: PolicyContext) -> None:
+        if self._axes is not None:
+            return
+        axes = tuple(ctx.sweep_axes) if ctx.sweep_axes else ()
+        if len(axes) < 2:
+            free = [n for n in sorted(ctx.param_space) if n != ctx.schedule_axis]
+            axes = tuple(free[:2])
+        self._axes = (axes[0], axes[1])       # (compared, held constant)
+        self.calib_axis = ctx.calibration_axis
+        calib_vals = ctx.param_space.get(self.calib_axis, ())
+        mid = calib_vals[len(calib_vals) // 2] if calib_vals else None
+        for level in ctx.param_space[self._axes[1]]:
+            self.calib_pref[level] = mid
+            self.calib_done[level] = not calib_vals
+        self.other_axes = [n for n in sorted(ctx.param_space)
+                           if n not in (*self._axes, self.calib_axis,
+                                        ctx.schedule_axis)]
+
+    @property
+    def compared(self) -> str:
+        return self._axes[0]
+
+    @property
+    def context(self) -> str:
+        return self._axes[1]
 
     def reset(self, ctx: PolicyContext) -> None:
         pass
@@ -63,48 +90,51 @@ class _ScriptedBase:
     def observe_result(self, result: dict, ctx: PolicyContext) -> None:
         pass
 
-    # -- water: a feedback controller on a PUBLIC, noiseless signal ---------
+    # -- calibration: a feedback controller on a PUBLIC, noiseless signal ---
 
-    def _ingest(self, obs) -> None:
+    def _ingest(self, obs, ctx) -> None:
         """Fold finished harvests into memory.
 
-        crop_health is deterministic and public, so steering water by it is
-        honest -- and it reveals nothing about the companion x spacing
-        interaction, which is the part that has to be discovered.
+        crop_health is deterministic and public, so steering the calibration
+        axis by it is honest -- and it says nothing about the interaction
+        between the two search axes, which is the part to be discovered.
         """
+        vals = ctx.param_space.get(self.calib_axis, ())
         for h in obs.recent_harvests:
             key = (h.get("tile_id"), h.get("trial_id"))
             if key in self.seen:
                 continue
-            cond = self.pending.pop(h.get("tile_id"), None)
-            if cond is None:
+            cell = self.pending.pop(h.get("tile_id"), None)
+            if cell is None:
                 continue
             self.seen.add(key)
-            companion, spacing = cond
             self.trials_run += 1
+            ctx_level = cell[1]
 
             health = h.get("crop_health")
-            if health == "wilted":
-                self.water_pref[spacing] = min(4, self.water_pref[spacing] + 1)
-            elif health == "waterlogged":
-                self.water_pref[spacing] = max(0, self.water_pref[spacing] - 1)
+            if vals and health in ("wilted", "waterlogged"):
+                cur = self.calib_pref.get(ctx_level, vals[len(vals) // 2])
+                i = vals.index(cur) if cur in vals else len(vals) // 2
+                i = min(len(vals) - 1, i + 1) if health == "wilted" else max(0, i - 1)
+                self.calib_pref[ctx_level] = vals[i]
             elif health == "healthy":
-                self.water_done[spacing] = True
+                self.calib_done[ctx_level] = True
 
-            if not self.water_done[spacing]:
-                self.water_tries[spacing] += 1
-                if self.water_tries[spacing] >= WATER_PROBES:
-                    self.water_done[spacing] = True
+            if not self.calib_done.get(ctx_level, True):
+                self.calib_tries[ctx_level] += 1
+                if self.calib_tries[ctx_level] >= WATER_PROBES:
+                    self.calib_done[ctx_level] = True
                 continue      # calibration trials are not evidence about cells
 
-            self.results[(companion, spacing)].append(float(h.get("yield_kg", 0.0)))
+            self.results[cell].append(float(h.get("yield_kg", 0.0)))
             if self.registered:
-                self.post_reg[(companion, spacing)] += 1
+                self.post_reg[cell] += 1
 
     # -- the loop ----------------------------------------------------------
 
     def decide(self, obs, ctx: PolicyContext) -> ActionProposal:
-        self._ingest(obs)
+        self._setup(ctx)
+        self._ingest(obs, ctx)
 
         ready = [t for t in obs.nearby_tiles if t["crop_ready"] and t["mine"]]
         if ready:
@@ -123,14 +153,10 @@ class _ScriptedBase:
                 if t["terrain"] == "arable" and not t["planted"]
                 and not t.get("fallow")]
         if free and obs.seeds > 0 and len(obs.plots) < ctx.config.max_concurrent_plots:
-            companion, spacing = self._next_condition(ctx)
+            cell = self._next_condition(ctx)
             tile = free[0]["tile"]
-            self.pending[tile[1] * 20 + tile[0]] = (companion, spacing)
-            return ActionProposal(Verb.PLANT, {
-                "tile": list(tile), "spacing": spacing,
-                "water": min(obs.water_stock, self.water_pref[spacing]),
-                "companion": companion,
-            })
+            self.pending[tile[1] * 20 + tile[0]] = cell
+            return ActionProposal(Verb.PLANT, self._plant_params(tile, cell, ctx))
 
         waiting = [p for p in obs.my_plots if p["ready"]]
         if waiting:
@@ -142,8 +168,21 @@ class _ScriptedBase:
                   if t["terrain"] == "arable" and t["tile"] != [obs.x, obs.y]]
         if arable:
             return ActionProposal(
-                Verb.MOVE, {"tile": list(arable[int(ctx.rng.integers(0, len(arable)))])})
+                Verb.MOVE,
+                {"tile": list(arable[int(ctx.rng.integers(0, len(arable)))])})
         return ActionProposal(Verb.NOOP)
+
+    def _plant_params(self, tile, cell, ctx) -> dict:
+        params: dict[str, Any] = {"tile": list(tile)}
+        params[self.compared], params[self.context] = cell
+        if self.calib_axis:
+            vals = ctx.param_space[self.calib_axis]
+            params[self.calib_axis] = self.calib_pref.get(
+                cell[1], vals[len(vals) // 2])
+        for name in self.other_axes:
+            vals = ctx.param_space[name]
+            params[name] = vals[len(vals) // 2]
+        return params
 
     @staticmethod
     def _step_toward(obs, target):
@@ -162,23 +201,23 @@ class _ScriptedBase:
 
     # -- calibration then exploration --------------------------------------
 
-    def _water_phase(self) -> tuple[str, int] | None:
-        """Fix water per spacing BEFORE measuring cells.
+    def _calibration_phase(self, ctx) -> tuple | None:
+        """Fix the calibration axis BEFORE measuring cells.
 
-        Learning water during the factorial poisons the early cells: a cell
-        measured at the wrong water looks bad for a reason that has nothing to
-        do with its companion.
+        Learning it during the factorial poisons early cells: a cell measured
+        at the wrong setting looks bad for a reason unrelated to its treatment.
         """
-        for s in SPACINGS:
-            if not self.water_done[s]:
-                return ("NONE", s)
+        reference = ctx.param_space[self.compared][0]
+        for level in ctx.param_space[self.context]:
+            if not self.calib_done.get(level, True):
+                return (reference, level)
         return None
 
-    def mean(self, companion: str, spacing: int) -> float | None:
-        vals = self.results.get((companion, spacing))
+    def mean(self, cell: tuple) -> float | None:
+        vals = self.results.get(cell)
         return sum(vals) / len(vals) if vals else None
 
-    def _next_condition(self, ctx) -> tuple[str, int]:
+    def _next_condition(self, ctx) -> tuple:
         raise NotImplementedError
 
     def _epistemic_action(self, obs, ctx):
@@ -196,65 +235,71 @@ class _ScriptedBase:
                                       {"claim_id": c["claim_id"]})
         return None
 
-    def _propose(self, companion: str, spacing: int):
+    def _propose(self, cell: tuple, ctx):
+        """Compare a level of the search axis against the domain's reference
+        level, holding the context axis fixed."""
+        treat, context = cell
+        reference = ctx.param_space[self.compared][0]
         return ActionProposal(
             Verb.PROPOSE_CLAIM,
             {
-                "spec": {"companion": {"op": "eq", "value": companion},
-                         "spacing": {"op": "eq", "value": spacing}},
-                "baseline": {"companion": {"op": "eq", "value": "NONE"},
-                             "spacing": {"op": "eq", "value": spacing}},
+                "spec": {self.compared: {"op": "eq", "value": treat},
+                         self.context: {"op": "eq", "value": context}},
+                "baseline": {self.compared: {"op": "eq", "value": reference},
+                             self.context: {"op": "eq", "value": context}},
                 "direction": "increase",
                 "min_delta": 0.3,
                 "claim_type": "comparison",
             },
-            message=f"{companion} at spacing {spacing} gives more than no "
-                    f"companion at the same spacing",
+            message=f"{self.compared} {treat} gives more than {reference} "
+                    f"when {self.context} is {context}",
         )
 
 
 @register
 class ScriptedGreedy(_ScriptedBase):
-    """One factor at a time. Provably trapped by this landscape.
+    """One factor at a time. Trapped by a deceptive landscape.
 
-    Sweeps spacing with no companion, fixes the best, then sweeps companions at
-    that spacing. Every single-variable move from the result is worse, so it
-    stops -- never trying the two-variable move that would escape.
+    Sweeps the context axis at the reference treatment, fixes the best, then
+    sweeps treatments there. Every single-variable move from the result is
+    worse, so it stops -- without trying the two-variable move that escapes.
     """
 
     name = "scripted_greedy"
 
     def __init__(self) -> None:
         super().__init__()
-        self.stage = "water"
-        self.best_spacing: int | None = None
-        self.best_companion: str | None = None
+        self.best_context = None
+        self.best_treat = None
 
     def _next_condition(self, ctx):
-        w = self._water_phase()
-        if w is not None:
-            return w
+        c = self._calibration_phase(ctx)
+        if c is not None:
+            return c
 
-        if self.best_spacing is None:
-            for s in SPACINGS:
-                if len(self.results[("NONE", s)]) < REPLICATES:
-                    return ("NONE", s)
-            self.best_spacing = max(
-                SPACINGS, key=lambda s: self.mean("NONE", s) or -1e9)
+        reference = ctx.param_space[self.compared][0]
+        contexts = ctx.param_space[self.context]
+        treats = ctx.param_space[self.compared]
 
-        if self.best_companion is None:
-            for c in COMPANIONS:
-                if len(self.results[(c, self.best_spacing)]) < REPLICATES:
-                    return (c, self.best_spacing)
-            self.best_companion = max(
-                COMPANIONS, key=lambda c: self.mean(c, self.best_spacing) or -1e9)
+        if self.best_context is None:
+            for level in contexts:
+                if len(self.results[(reference, level)]) < REPLICATES:
+                    return (reference, level)
+            self.best_context = max(
+                contexts, key=lambda L: self.mean((reference, L)) or -1e9)
 
-        # Converged. Gather evidence for the claim it can actually make.
-        c, s = self.best_companion, self.best_spacing
-        if c == "NONE":
-            return ("NONE", s)
-        return (c, s) if self.post_reg[(c, s)] <= self.post_reg[("NONE", s)] \
-            else ("NONE", s)
+        if self.best_treat is None:
+            for t in treats:
+                if len(self.results[(t, self.best_context)]) < REPLICATES:
+                    return (t, self.best_context)
+            self.best_treat = max(
+                treats, key=lambda t: self.mean((t, self.best_context)) or -1e9)
+
+        cell = (self.best_treat, self.best_context)
+        base = (reference, self.best_context)
+        if self.best_treat == reference:
+            return cell
+        return cell if self.post_reg[cell] <= self.post_reg[base] else base
 
     def _epistemic_action(self, obs, ctx):
         reg = self._register_pending(obs)
@@ -262,50 +307,54 @@ class ScriptedGreedy(_ScriptedBase):
             return reg
         if self.registered or self.claim_id is not None:
             return None
-        if self.best_companion in (None, "NONE"):
+        if self.best_treat is None or \
+                self.best_treat == ctx.param_space[self.compared][0]:
             return None
-        if len(self.results[(self.best_companion, self.best_spacing)]) < REPLICATES:
+        if len(self.results[(self.best_treat, self.best_context)]) < REPLICATES:
             return None
         self.claim_id = "pending"
-        return self._propose(self.best_companion, self.best_spacing)
+        return self._propose((self.best_treat, self.best_context), ctx)
 
 
 @register
 class ScriptedFactorial(_ScriptedBase):
-    """Full companion x spacing factorial, then a pre-registered claim.
+    """Full factorial over the domain's two search axes, then a claim.
 
-    Expensive and unsubtle, but it does see the interaction. Its trial cost is
-    the yardstick an LLM must beat to be doing more than brute force.
+    Expensive and unsubtle, but it sees interactions. Its trial cost is the
+    yardstick an LLM must beat to be doing more than brute force.
     """
 
     name = "scripted_factorial"
 
     def __init__(self) -> None:
         super().__init__()
-        self.cells = [(c, s) for s in SPACINGS for c in COMPANIONS]
-        self.best: tuple[str, int] | None = None
+        self.best: tuple | None = None
+
+    def _cells(self, ctx):
+        return [(t, c) for c in ctx.param_space[self.context]
+                for t in ctx.param_space[self.compared]]
 
     def _next_condition(self, ctx):
-        w = self._water_phase()
-        if w is not None:
-            return w
+        c = self._calibration_phase(ctx)
+        if c is not None:
+            return c
 
-        for cell in self.cells:
+        for cell in self._cells(ctx):
             if len(self.results[cell]) < REPLICATES:
                 return cell
 
         if self.best is None:
-            c, s = max(self.cells, key=lambda cs: self.mean(*cs) or -1e9)
-            self.best = (c, s)
+            self.best = max(self._cells(ctx), key=lambda c: self.mean(c) or -1e9)
 
-        c, s = self.best
-        if c == "NONE":
-            return (c, s)
+        treat, context = self.best
+        reference = ctx.param_space[self.compared][0]
+        if treat == reference:
+            return self.best
         # Strict alternation on POST-REGISTRATION counts. Balancing on all-time
         # counts leaves one arm short after registration and the claim stalls
         # forever on insufficient_evidence.
-        return (c, s) if self.post_reg[(c, s)] <= self.post_reg[("NONE", s)] \
-            else ("NONE", s)
+        base = (reference, context)
+        return self.best if self.post_reg[self.best] <= self.post_reg[base] else base
 
     def _epistemic_action(self, obs, ctx):
         reg = self._register_pending(obs)
@@ -313,8 +362,7 @@ class ScriptedFactorial(_ScriptedBase):
             return reg
         if self.registered or self.claim_id is not None or self.best is None:
             return None
-        c, s = self.best
-        if c == "NONE":
+        if self.best[0] == ctx.param_space[self.compared][0]:
             return None
         self.claim_id = "pending"
-        return self._propose(c, s)
+        return self._propose(self.best, ctx)

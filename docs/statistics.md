@@ -343,6 +343,97 @@ interaction, so agent claims are strictly richer than anything it proposes. Its
 
 ---
 
+## 4.4 The partial effect size — a bug found by the agronomy domain
+
+Calibrating agronomy exposed a real defect in the statistics layer: `ancova`
+reported a p-value on the **adjusted** effect but computed Hedges' g on the
+**raw** pooled sd. An adjusted p beside a raw effect size is incoherent, and
+the mismatch is not academic.
+
+In agronomy the sowing day swings rainfall by +/-120mm, so it dominates the raw
+variance while the analysis adjusts it away. Raw g therefore stayed small no
+matter how much evidence accumulated, and the `g >= 0.5` floor capped power at
+a value **no sample size could beat**:
+
+| n/group | power BEFORE the fix | power AFTER |
+|---:|---:|---:|
+| 10 | 0.268 | 0.403 |
+| 14 | 0.406 | 0.615 |
+| 18 | 0.487 | 0.780 |
+| 20 | 0.494 | **0.841** |
+
+Power that stops rising with n is the signature. `ancova` now standardises by
+the residual sd (a partial effect size), consistent with the p-value beside it.
+
+Synthetic was re-verified afterwards: n=16 power 0.851 (was 0.835, still
+clears 0.80), null FPR 0.0103 CI [0.0089, 0.0117] at alpha=0.01 and 0.0516 CI
+[0.0486, 0.0548] at alpha=0.05 — both containing nominal. `min_trials_holdout`
+= 12 is now conservative (n=10 would suffice) and was left as is.
+
+---
+
+## 4.5 Agronomy domain — calibrated 2026-09-05
+
+Hidden function: reciprocal yield-density (Shinozaki & Kira) x FAO-33 water
+production (Ky = 1.25, maize) x Mitscherlich nitrogen, with three real
+couplings — N needs water to be taken up, dense stands draw down soil N and
+lodge under heavy N, and nitrate leaches from an over-watered profile.
+
+First composition was **degenerate**: the optimum sat at maximum nitrogen,
+irrigation saturated, and the N x density interaction did nothing. Real
+agronomy has costs to over-application; adding waterlogging, N-driven lodging
+and leaching produced interior optima and a genuine, counterintuitive
+interaction:
+
+| density | best N |
+|---:|---:|
+| 2 | 200 |
+| 6 | 100 |
+| 10 | 50 |
+
+Optimal nitrogen *falls* as stands get denser, because a heavily fertilised
+dense stand lodges.
+
+Calibrated on the hardest target worth banking (N=100 vs N=50 at density 6,
+irrigation 200 — delta +0.658, 1.46 sigma):
+
+**`min_trials_per_group = 20`** (power 0.841, CI [0.829, 0.852]),
+**`min_trials_holdout = 14`** (power 0.850). Null FPR 0.0090, CI
+[0.0070, 0.0113] at alpha=0.01.
+
+Agronomy needs MORE evidence than synthetic, which is the honest result: a spec
+that matched synthetic's would be a copy, not a calibration.
+
+### Agronomy is not deceptive, and that is fine
+
+Coordinate ascent reaches within 1.3% of the optimum here (5.851 vs 5.926).
+Real agronomy is largely separable — which is *why* humans discovered it. The
+synthetic domain carries the deceptive-landscape role; agronomy tests whether
+the same machinery works when the hidden function is real science.
+
+---
+
+## 4.6 Phase 9 — the capability chain, and the bug it uncovered
+
+The vertical slice fires end to end: at tick 721 of a Builder run a claim
+reached GENERALIZED (water=3 beats water=0, effect 1.84, p = 3.4e-22), compiled
+into a procedure, unlocked the irrigation capability, and at tick 723 an
+artifact was built. Four agents, four artifacts.
+
+It did not work at first, and the reason was a genuine analysis bug:
+
+> **A claim was being adjusted for its own variable.** `water` is in the
+> default covariate set, so a claim *about* water was perfectly collinear with
+> its own contrast and the fitted effect came back as **exactly 0.0** however
+> strong the real effect was.
+
+A silent, total failure that looked like the agent being wrong rather than us,
+and it blocked the entire capability chain. Covariates now exclude every
+variable the claim's own definition constrains. Any claim about water, sowing
+day or soil would have been silently zeroed before this.
+
+---
+
 ## 5. Known soft spot
 
 Uncontrolled trials reach only 0.393 power even at n=20. That is the intended

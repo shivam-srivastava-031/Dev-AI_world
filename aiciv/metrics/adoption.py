@@ -29,28 +29,42 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
-#: Parameters an agent could plausibly form a contrast about. These are the
-#: PUBLIC action parameters, the same ones it chose when planting.
+#: Fallback contrast variables when no domain is supplied.
 OPPORTUNITY_VARIABLES = ("companion", "spacing", "water")
 
-#: Fields this module is permitted to read. Anything else is a boundary breach.
-VISIBLE_FIELDS = frozenset({
+#: Fields readable in any world. A domain parameter is readable too --
+#: the agent chose it.
+BASE_VISIBLE_FIELDS = frozenset({
     "trial_id", "agent_id", "tile_id", "planted_tick", "harvested_tick",
-    "spacing", "plant_day", "water", "companion", "soil_band",
-    "skill_at_plant", "yield_kg", "crop_health",
+    "soil_band", "skill_at_plant", "yield_kg", "crop_health",
 })
+
+#: Kept for callers pinned to the synthetic world.
+VISIBLE_FIELDS = BASE_VISIBLE_FIELDS | {"spacing", "plant_day", "water",
+                                        "companion"}
+
+#: Removed unconditionally. Checked by name rather than left off an
+#: allow-list, so a new hidden field cannot slip through by omission.
+FORBIDDEN_FIELDS = frozenset({"stratum", "true_mu", "signature", "params"})
 
 MIN_PER_ARM = 6        # enough to form an impression; well under verification n
 SALIENCE_D = 0.5       # observed standardised difference, from the agent's data
 
 
-def project(rows: Iterable[dict]) -> list[dict]:
+def project(rows: Iterable[dict], domain=None) -> list[dict]:
     """Strip every field an agent could not have seen.
 
     Called on the way in so this module cannot accidentally depend on hidden
-    state even if a caller hands it raw world rows.
+    state even if a caller hands it raw world rows. Domain parameters are
+    kept because the agent chose them; the forbidden set goes regardless.
     """
-    return [{k: v for k, v in r.items() if k in VISIBLE_FIELDS} for r in rows]
+    allowed = set(BASE_VISIBLE_FIELDS)
+    if domain is not None:
+        allowed |= set(domain.param_space)
+    else:
+        allowed |= {"spacing", "plant_day", "water", "companion"}
+    allowed -= FORBIDDEN_FIELDS
+    return [{k: v for k, v in r.items() if k in allowed} for r in rows]
 
 
 @dataclass(frozen=True)
@@ -94,7 +108,8 @@ def opportunities(
     rows: Iterable[dict],
     *,
     min_per_arm: int = MIN_PER_ARM,
-    variables: Sequence[str] = OPPORTUNITY_VARIABLES,
+    variables: Sequence[str] | None = None,
+    domain=None,
 ) -> list[Opportunity]:
     """Every contrast this agent had enough of its own evidence to form.
 
@@ -102,7 +117,11 @@ def opportunities(
     pair with the larger observed mean is emitted -- an agent forms the
     hypothesis in the direction the data suggests.
     """
-    rows = project(rows)
+    rows = project(rows, domain)
+    if variables is None:
+        variables = (tuple(n for n in sorted(domain.param_space)
+                           if n != domain.schedule_axis)
+                     if domain is not None else OPPORTUNITY_VARIABLES)
     if not rows:
         return []
     agent = int(rows[0].get("agent_id", -1))

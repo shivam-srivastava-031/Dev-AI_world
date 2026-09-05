@@ -1,0 +1,34 @@
+# The contrast the design exists to produce.
+#
+# Arms are paired on the SAME seeds: worlds differ enormously between seeds, so
+# an unpaired comparison spends most of its power on that rather than on the
+# thing being tested.
+#
+#   social_teaching - social_no_teaching   isolates whether teaching helps
+#   scripted_factorial - scripted_greedy   isolates whether method helps
+#   scripted_factorial - random            the floor everything is measured from
+#
+# Run with:
+#   python -m aiciv.cli experiment --name transfer --seeds 42,43,44,45,46
+name: transfer
+domain: synthetic
+ticks: 1200
+agents: 5
+seeds: [42, 43, 44, 45, 46]
+
+arms:
+  - {name: random,             policy: random}
+  - {name: scripted_greedy,    policy: scripted_greedy}
+  - {name: scripted_factorial, policy: scripted_factorial}
+  - {name: social_no_teaching, policy: honest, teaching: false}
+  - {name: social_teaching,    policy: honest, teaching: true}
+  - {name: copycat,            policy: copycat}
+  - {name: liar,               policy: liar}
+
+# Expected-failure notes, recorded BEFORE running so a null result cannot be
+# quietly reinterpreted afterwards:
+#
+#  - A tuned scripted searcher may beat a 7B model outright. That is a finding.
+#  - With current timing, copycats finish exploring before anyone teaches them,
+#    so copying may cost them nothing. Also a finding.
+#  - Teaching may show up as diffusion without improving time-to-competence.

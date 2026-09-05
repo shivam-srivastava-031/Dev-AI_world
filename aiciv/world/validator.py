@@ -25,9 +25,11 @@ from .state import CropStage, WorldState
 PARAM_SPEC: dict[Verb, tuple[frozenset[str], frozenset[str]]] = {
     Verb.MOVE: (frozenset({"tile"}), frozenset()),
     Verb.INSPECT_TILE: (frozenset({"tile"}), frozenset()),
-    Verb.PLANT: (frozenset({"tile", "spacing", "water", "companion"}), frozenset()),
+    # PLANT is filled in from the domain at validation time; see plant_params().
+    Verb.PLANT: (frozenset({"tile"}), frozenset()),
     Verb.TEND: (frozenset({"tile"}), frozenset()),
     Verb.HARVEST: (frozenset({"tile"}), frozenset()),
+    Verb.BUILD_CHANNEL: (frozenset({"tile"}), frozenset()),
     Verb.EAT: (frozenset(), frozenset()),
     Verb.REST: (frozenset(), frozenset()),
     Verb.NOOP: (frozenset(), frozenset()),
@@ -46,7 +48,35 @@ PARAM_SPEC: dict[Verb, tuple[frozenset[str], frozenset[str]]] = {
 
 #: Verbs that touch a tile, and whether that tile must be reachable.
 TILE_VERBS = frozenset({Verb.MOVE, Verb.INSPECT_TILE, Verb.PLANT,
-                        Verb.TEND, Verb.HARVEST, Verb.PREDICT})
+                        Verb.TEND, Verb.HARVEST, Verb.PREDICT,
+                        Verb.BUILD_CHANNEL})
+
+
+def plant_params(domain: Domain) -> frozenset[str]:
+    """Parameters PLANT must carry in this world.
+
+    The schedule axis is excluded: it is set by WHEN the agent acts, so asking
+    it to supply one would be asking it to choose something it cannot.
+    """
+    return frozenset(n for n in domain.param_space if n != domain.schedule_axis)
+
+
+def water_cost(domain: Domain, params: dict) -> int:
+    """What planting costs from the agent's own water store.
+
+    Domains express irrigation on their own scale (units, or millimetres), so
+    the cost is normalised against that axis' range rather than assumed.
+    """
+    axis = domain.calibration_axis
+    if not axis or axis not in params:
+        return 0
+    values = domain.param_space[axis].values
+    span = max(values) - min(values)
+    if span <= 0:
+        return 0
+    from ..config import WATER_CARRY_MAX
+    frac = (float(params[axis]) - min(values)) / span
+    return int(round(frac * (WATER_CARRY_MAX // 2)))
 
 
 def _reject(code: RejectionCode, detail: str = "") -> Rejection:
@@ -76,6 +106,7 @@ def validate(
     *,
     language_gate: Callable[[str], Rejection | None] | None = None,
     claimed_tiles: set[TileId] | None = None,
+    capabilities=None,
 ) -> Accepted | Rejection:
     """Validate one proposal against a FROZEN snapshot.
 
@@ -94,6 +125,8 @@ def validate(
         return _reject(RejectionCode.E_SCHEMA_UNKNOWN_ACTION, proposal.verb.value)
 
     required, optional = PARAM_SPEC[proposal.verb]
+    if proposal.verb is Verb.PLANT:
+        required = required | plant_params(domain)
     supplied = set(proposal.params)
     missing = required - supplied
     if missing:
@@ -112,12 +145,8 @@ def validate(
             return rej
 
     if proposal.verb is Verb.PLANT:
-        recipe = {
-            "spacing": proposal.params["spacing"],
-            "water": proposal.params["water"],
-            "companion": proposal.params["companion"],
-            "plant_day": state.day_of_cycle,      # committed by WHEN you act
-        }
+        recipe = {k: proposal.params[k] for k in plant_params(domain)}
+        recipe[domain.schedule_axis] = state.day_of_cycle  # committed by WHEN you act
         detail = domain.validate_recipe(recipe)
         if detail is not None:
             return _reject(RejectionCode.E_BOUNDS_PARAM_RANGE, detail)
@@ -179,10 +208,17 @@ def validate(
             return _reject(RejectionCode.E_RES_TOO_MANY_PLOTS,
                            f"you already tend {len(agent.plots)} plots "
                            f"(max {state.config.max_concurrent_plots})")
-        if agent.water_stock < int(proposal.params["water"]):
+        cost = water_cost(domain, proposal.params)
+        # The built environment counts toward what an agent can water. This
+        # is where technology changes the action space: a channel makes
+        # recipes affordable that were previously impossible to attempt.
+        available = agent.water_stock
+        if capabilities is not None:
+            available += capabilities.water_bonus_at(
+                state.grid, agent.x, agent.y)
+        if available < cost:
             return _reject(RejectionCode.E_RES_INSUFFICIENT_WATER,
-                           f"you carry {agent.water_stock}, need "
-                           f"{proposal.params['water']}")
+                           f"you can water {available}, need {cost}")
 
     if proposal.verb in (Verb.HARVEST, Verb.TEND):
         crop = state.crops.get(tile_id)
@@ -196,6 +232,21 @@ def validate(
 
     if proposal.verb is Verb.EAT and agent.food <= 0:
         return _reject(RejectionCode.E_RES_NO_FOOD, "you have nothing to eat")
+
+    if proposal.verb is Verb.BUILD_CHANNEL:
+        from ..capabilities.procedure import CapabilityId
+        if capabilities is None:
+            return _reject(RejectionCode.E_CAP_NOT_HELD,
+                           "nothing can be built in this world")
+        if int(tile_id) in capabilities.by_tile:
+            return _reject(RejectionCode.E_CAP_ALREADY_BUILT, str(tile_id))
+        detail = capabilities.can_build(
+            int(agent_id), CapabilityId.IRRIGATION,
+            agent.skill_farming, agent.seeds)
+        if detail is not None:
+            code = (RejectionCode.E_CAP_NOT_HELD
+                    if "know" in detail else RejectionCode.E_CAP_INSUFFICIENT)
+            return _reject(code, detail)
 
     # ---- stage 5: LANGUAGE ------------------------------------------------
     if proposal.verb in MESSAGE_VERBS and language_gate is not None:

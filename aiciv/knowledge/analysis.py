@@ -137,10 +137,25 @@ def ancova(
     t = effect / se
     pval = float(stats.t.sf(t, df))                       # one-sided, H1: beta > 0
     tcrit = stats.t.ppf(1 - (1 - conf) / 2, df)
-    g = hedges_g(y[treat.ravel() == 1], y[treat.ravel() == 0])
+
+    # PARTIAL effect size: standardised by the RESIDUAL sd, not the raw pooled
+    # sd. Reporting an adjusted p-value beside a raw effect size is incoherent,
+    # and the mismatch is not academic: in a domain where an adjusted-away
+    # covariate dominates the raw variance (sowing day swinging rainfall, say),
+    # raw g stays small no matter how much evidence accumulates, so an
+    # effect-size floor silently caps power at a value no sample size can beat.
+    resid_sd = float(np.sqrt(s2))
+    if resid_sd > 0:
+        d_adj = effect / resid_sd
+        denom = 4 * (n1 + n2) - 9
+        j = 1.0 - 3.0 / denom if denom > 0 else 1.0
+        g = float(d_adj * j)
+    else:
+        g = 0.0
+
     return TestResult(effect, effect - tcrit * se, effect + tcrit * se, pval,
                       g, n1, n2, float(df), "ancova",
-                      detail={"n_covariates": p - 2})
+                      detail={"n_covariates": p - 2, "effect_size": "partial"})
 
 
 def benjamini_hochberg(pvals: list[float], alpha: float) -> list[bool]:

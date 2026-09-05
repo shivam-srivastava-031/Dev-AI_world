@@ -108,5 +108,9 @@ class TrialFactory:
 
 
 def rows_of(trials) -> list[dict]:
-    """Trial objects -> the dict rows the verifier consumes."""
-    return [asdict(t) for t in trials]
+    """Trial objects -> the dict rows the verifier consumes.
+
+    ``flat()`` merges the recipe up to the top level, which is the shape claim
+    matching and covariate assembly expect.
+    """
+    return [t.flat() for t in trials]

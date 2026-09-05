@@ -22,6 +22,9 @@ class PolicyContext:
     rng: np.random.Generator
     config: Any
     param_space: dict[str, tuple]      # PUBLIC: what may be varied, not what it does
+    sweep_axes: tuple = ()             # which axes a search should cross
+    calibration_axis: str = ""         # which axis crop_health speaks to
+    schedule_axis: str = "plant_day"   # set by WHEN you act, not by choice
     notes: dict[str, Any] = field(default_factory=dict)
 
 

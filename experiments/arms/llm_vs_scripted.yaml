@@ -1,0 +1,28 @@
+# Does the model add anything over a scripted searcher?
+#
+# The bracket that makes the answer interpretable:
+#   scores like scripted_greedy     -> no advantage over naive method
+#   scores like scripted_factorial
+#     at similar trial cost         -> brute force
+#   beats scripted_factorial on
+#     trials_to_first_confirmed     -> inference
+#
+# `scaffold` is the sensitive knob. rules_only is the experiment;
+# rules_plus_method is the contrast arm that quantifies what handing them the
+# method is worth. Report the prior probe alongside any result from this file.
+name: llm_vs_scripted
+domain: synthetic
+ticks: 400          # LLM arms are wall-clock bound; see docs/statistics.md
+agents: 5
+seeds: [42, 43, 44]
+
+arms:
+  - {name: scripted_greedy,    policy: scripted_greedy}
+  - {name: scripted_factorial, policy: scripted_factorial}
+  - {name: llm_rules_only,     policy: llm, scaffold: rules_only}
+  - {name: llm_with_method,    policy: llm, scaffold: rules_plus_method}
+
+# Budget before committing: ~4000 calls per run at ~4s each is ~4.5 hours.
+# Four arms x three seeds is roughly 54 hours. Cut seeds or ticks, or
+# parallelise the DECIDE phase -- which is safe, because every agent decides
+# against the same frozen snapshot.

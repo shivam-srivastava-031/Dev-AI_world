@@ -80,6 +80,31 @@ becomes endogenous through outcomes only.
 None. `GOAL_SET` exists and is empty at tick 0. No agent is given an objective,
 a target yield, a research programme, or a suggestion to investigate anything.
 
+### 2.6 The protocol actions — a grant we cannot avoid
+
+**Offering `PROPOSE_CLAIM` grants comparison vocabulary.**
+
+An action whose signature reads `{"spec": ..., "baseline": ..., "direction":
+..., "min_delta": ...}` tells an agent, before it has done anything, that
+comparing one condition against another is a thing one does and that a
+difference has a size. That is a real prior. It is listed here as `GRANTED`
+rather than quietly ignored, because the alternative — offering the action and
+then claiming the agent invented comparison — would be circular.
+
+What is still `WITHHELD` alongside it:
+
+- any instruction to use these actions at all;
+- any account of how to gather evidence that would support a claim;
+- any statement that repetition, controls or independent replication matter;
+- any indication that the knowledge base is worth engaging with.
+
+**The measurement.** `protocol_offered=False` removes the three protocol
+actions entirely, and a test asserts that with them gone **no** method
+vocabulary remains anywhere in the prompt. The gap between that arm and the
+default is what merely naming the protocol is worth. Without that arm, this
+grant would be an uncontrolled confound sitting underneath every adoption
+number the project reports.
+
 ---
 
 ## 3. WITHHELD — deliberately absent and actively scrubbed

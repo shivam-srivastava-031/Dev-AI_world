@@ -24,6 +24,7 @@ class Verb(str, Enum):
     PLANT = "PLANT"
     TEND = "TEND"
     HARVEST = "HARVEST"
+    BUILD_CHANNEL = "BUILD_CHANNEL"
     EAT = "EAT"
     REST = "REST"
     # --- communication ---------------------------------------------------
@@ -85,6 +86,9 @@ class RejectionCode(str, Enum):
     E_RES_NO_SEEDS = "E_RES_NO_SEEDS"
     E_RES_TILE_ALREADY_PLANTED = "E_RES_TILE_ALREADY_PLANTED"
     E_RES_TILE_FALLOW = "E_RES_TILE_FALLOW"
+    E_CAP_NOT_HELD = "E_CAP_NOT_HELD"
+    E_CAP_INSUFFICIENT = "E_CAP_INSUFFICIENT"
+    E_CAP_ALREADY_BUILT = "E_CAP_ALREADY_BUILT"
     E_RES_TILE_NOT_PLANTED = "E_RES_TILE_NOT_PLANTED"
     E_RES_CROP_NOT_MATURE = "E_RES_CROP_NOT_MATURE"
     E_RES_ENERGY = "E_RES_ENERGY"
@@ -154,6 +158,9 @@ HINTS: dict[RejectionCode, str] = {
     RejectionCode.E_RES_NO_SEEDS: "You have no seeds.",
     RejectionCode.E_RES_TILE_ALREADY_PLANTED: "Something is already growing there.",
     RejectionCode.E_RES_TILE_FALLOW: "That ground was worked too recently and needs to rest.",
+    RejectionCode.E_CAP_NOT_HELD: "You do not know how to build that yet.",
+    RejectionCode.E_CAP_INSUFFICIENT: "You know how, but you are not ready to do it yet.",
+    RejectionCode.E_CAP_ALREADY_BUILT: "There is already one of those here.",
     RejectionCode.E_RES_TILE_NOT_PLANTED: "Nothing is growing there.",
     RejectionCode.E_RES_CROP_NOT_MATURE: "That crop is not ready to harvest yet.",
     RejectionCode.E_RES_ENERGY: "You are too tired. Rest first.",

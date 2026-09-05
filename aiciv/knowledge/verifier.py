@@ -143,6 +143,26 @@ def _orient(claim: KnowledgeClaim, a: np.ndarray, b: np.ndarray):
     return (b, a) if claim.predicted_direction == "decrease" else (a, b)
 
 
+def claim_variables(claim) -> set[str]:
+    """Every field the claim's own definition constrains."""
+    return set(claim.spec.conditions) | set(claim.baseline.conditions)
+
+
+def _usable_covariates(claim, names, treat, ctrl) -> tuple[str, ...]:
+    """Drop covariates the claim is ABOUT, and any that are not present.
+
+    Adjusting for the treatment removes the treatment. A claim about water,
+    analysed with water in the covariate set, is perfectly collinear with its
+    own contrast and the fitted effect comes back as exactly 0.0 no matter how
+    strong the real effect is -- a silent, total failure that looks like a
+    refutation of the agent rather than a bug in us.
+    """
+    about = claim_variables(claim)
+    rows = list(treat) + list(ctrl)
+    return tuple(n for n in names
+                 if n not in about and all(n in r for r in rows))
+
+
 def _analyse_comparison(claim, treat, ctrl, spec) -> TestResult:
     yt, yc = _yields(treat), _yields(ctrl)
     a, b = _orient(claim, yt, yc)
@@ -150,7 +170,9 @@ def _analyse_comparison(claim, treat, ctrl, spec) -> TestResult:
         return welch(a, b)
 
     names = claim.adjustment_set or DEFAULT_COMPARISON_COVARIATES
-    names = tuple(n for n in names if all(n in r for r in list(treat) + list(ctrl)))
+    names = _usable_covariates(claim, names, treat, ctrl)
+    if not names:
+        return welch(a, b)
     rows = list(treat) + list(ctrl)
     if claim.predicted_direction == "decrease":
         rows = list(ctrl) + list(treat)
@@ -167,7 +189,7 @@ def _analyse_causal(claim, treat, ctrl, spec) -> TestResult:
     can absorb the effect being estimated.
     """
     names = tuple(claim.adjustment_set) or DEFAULT_CAUSAL_COVARIATES
-    names = tuple(n for n in names if all(n in r for r in list(treat) + list(ctrl)))
+    names = _usable_covariates(claim, names, treat, ctrl)
 
     blocks_t = block_by_skill(list(treat))
     blocks_c = block_by_skill(list(ctrl))

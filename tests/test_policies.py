@@ -36,9 +36,12 @@ def picks(engine: Engine) -> list[tuple]:
     out = []
     for aid in engine.state.agent_ids():
         p = engine.policies[int(aid)]
+        # ScriptedFactorial stores `best`; ScriptedGreedy stores the two
+        # halves separately. Reading the wrong names silently reported
+        # (None, None) and made a trapped population look untrapped.
         out.append(getattr(p, "best", None)
-                   or (getattr(p, "best_companion", None),
-                       getattr(p, "best_spacing", None)))
+                   or (getattr(p, "best_treat", None),
+                       getattr(p, "best_context", None)))
     return out
 
 
