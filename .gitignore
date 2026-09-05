@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+runs/
+!runs/.gitkeep
+node_modules/
+.next/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
