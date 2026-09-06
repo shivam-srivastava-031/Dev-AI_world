@@ -78,7 +78,42 @@ def cmd_run(args) -> int:
         teaching_enabled=not args.no_teaching, arm=args.arm)
     domain = build_domain(args.domain, cfg.water_hint)
     engine = Engine(cfg, domain)
-    engine.run()
+
+    if args.policy == "llm":
+        # Swap in the model-backed policy. The registry builds policies with no
+        # arguments, so the model, scaffold and timeout are wired here.
+        from .agents.policies.llm.policy import OllamaLLMPolicy
+        for aid in engine.state.agent_ids():
+            engine.policies[int(aid)] = OllamaLLMPolicy(
+                model=args.model, host=args.host, scaffold=cfg.scaffold_level,
+                timeout=args.llm_timeout)
+
+    run_id = args.run_id or f"{cfg.arm}_s{cfg.seed}_{cfg.policy}"
+
+    if args.checkpoint_every > 0 and not args.no_save:
+        # A long model-driven run is measured in hours. Without checkpointing,
+        # a failure at hour twenty discards everything: the evidence exists
+        # only in memory. Partial state is written periodically so a lost run
+        # costs the remaining ticks rather than all of them.
+        import time as _time
+        store = RunStore(RUNS / f"{run_id}.sqlite")
+        started = _time.time()
+        for tick in range(cfg.ticks):
+            engine.tick()
+            done = tick + 1
+            if done % args.checkpoint_every == 0 or done == cfg.ticks:
+                store.save_run(run_id, engine,
+                               manifest=manifest(cfg, domain, engine))
+                rate = (_time.time() - started) / done
+                print(f"  tick {done}/{cfg.ticks}  "
+                      f"trials={len(engine.trials)}  "
+                      f"claims={sum(v for v in engine.kb.counts().values())}  "
+                      f"{rate:.1f}s/tick  "
+                      f"eta {(cfg.ticks - done) * rate / 60:.0f}min",
+                      file=sys.stderr, flush=True)
+        store.close()
+    else:
+        engine.run()
 
     report = civilization_report(engine, domain)
 
@@ -106,7 +141,6 @@ def cmd_run(args) -> int:
     report["capabilities"] = {
         k: v for k, v in engine.capabilities.report().items() if k != "events"}
 
-    run_id = args.run_id or f"{cfg.arm}_s{cfg.seed}_{cfg.policy}"
     if not args.no_save:
         store = RunStore(RUNS / f"{run_id}.sqlite")
         store.save_run(run_id, engine,
@@ -272,6 +306,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="control arm: TEACH is rejected")
     r.add_argument("--no-save", action="store_true")
     r.add_argument("--arm", default="default")
+    r.add_argument("--model", default="assistant:latest",
+                   help="only used when --policy llm")
+    r.add_argument("--host", default="http://127.0.0.1:11434")
+    r.add_argument("--llm-timeout", type=float, default=300.0)
+    r.add_argument("--checkpoint-every", type=int, default=0,
+                   help="save partial state every N ticks; essential for runs "
+                        "measured in hours")
     r.set_defaults(func=cmd_run)
 
     rp = sub.add_parser("replay", help="re-execute a recorded run and verify it")
