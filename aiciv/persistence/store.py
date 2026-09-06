@@ -79,18 +79,37 @@ CREATE TABLE IF NOT EXISTS storage_accounting (
 
 
 class RunStore:
-    def __init__(self, path: pathlib.Path) -> None:
+    def __init__(self, path: pathlib.Path, *, read_only: bool = False) -> None:
         self.path = pathlib.Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path)
+        self.read_only = read_only
+        if read_only:
+            # A reader must not touch the file a live run is writing. Opening
+            # it read/write would run the schema script, and that takes a
+            # write lock: a dashboard poll could then stall or fail the run it
+            # is meant to be observing. WAL lets this read a consistent
+            # snapshot while the engine keeps writing.
+            uri = f"file:{self.path.as_posix()}?mode=ro"
+            self.conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(SCHEMA)
-        self.conn.commit()
+        if not read_only:
+            self.conn.executescript(SCHEMA)
+            self.conn.commit()
 
     # -- writing ------------------------------------------------------------
 
     def save_run(self, run_id: str, engine, *, manifest: dict[str, Any],
-                 metrics: dict[str, Any] | None = None) -> None:
+                 metrics: dict[str, Any] | None = None,
+                 status: str = "complete") -> None:
+        """``status='running'`` marks a mid-run checkpoint.
+
+        A checkpoint used to be stored as 'complete', so a run twenty ticks
+        into four hundred was indistinguishable from a finished one. Anything
+        reading the store then reports a partial result as a final one, which
+        is the single most misleading thing this file could do.
+        """
         cfg = engine.config
         hashes = engine.hash_sequence()
         c = self.conn
@@ -107,12 +126,12 @@ class RunStore:
             "INSERT INTO runs (run_id, arm, seed, ticks, agents, policy, domain,"
             " domain_version, config_json, config_hash, manifest_json,"
             " final_state_hash, started_at, status) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),'complete')",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'),?)",
             (run_id, cfg.arm, cfg.seed, cfg.ticks, cfg.n_agents, cfg.policy,
              engine.domain.name, engine.domain.version,
              stable_json(asdict(cfg)), cfg.hash,
              json.dumps(manifest, sort_keys=True, default=str),
-             hashes[-1] if hashes else None))
+             hashes[-1] if hashes else None, status))
 
         c.executemany(
             "INSERT OR REPLACE INTO ticks (run_id, tick, state_hash) VALUES (?,?,?)",
@@ -191,9 +210,15 @@ class RunStore:
     # -- reading ------------------------------------------------------------
 
     def runs(self) -> list[dict[str, Any]]:
+        # ticks_recorded comes from the tick table rather than the run row, so
+        # progress is whatever was actually written -- a run killed between
+        # checkpoints reports the last tick it truly reached.
         return [dict(r) for r in self.conn.execute(
-            "SELECT run_id, arm, seed, ticks, agents, policy, domain,"
-            " final_state_hash, started_at FROM runs ORDER BY started_at DESC")]
+            "SELECT r.run_id, r.arm, r.seed, r.ticks, r.agents, r.policy,"
+            " r.domain, r.final_state_hash, r.started_at, r.status,"
+            " (SELECT COUNT(*) FROM ticks t WHERE t.run_id = r.run_id)"
+            "   AS ticks_recorded"
+            " FROM runs r ORDER BY r.started_at DESC")]
 
     def run(self, run_id: str) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT * FROM runs WHERE run_id = ?",

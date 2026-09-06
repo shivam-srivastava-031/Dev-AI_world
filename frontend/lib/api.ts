@@ -7,6 +7,32 @@ export type RunSummary = {
   run_id: string; arm: string; seed: number; ticks: number;
   agents: number; policy: string; domain: string;
   final_state_hash: string; started_at: string;
+  status: string; ticks_recorded: number;
+};
+
+export type Progress = {
+  run_id: string;
+  ticks_recorded: number;
+  ticks_requested: number;
+  status: string;
+  // Derived from the recorded ticks, not the status column: a checkpoint
+  // written by an older build says "complete" however far in it actually is.
+  live: boolean;
+  trials: number;
+  claims: number;
+};
+
+export type Report = {
+  run_id: string;
+  ticks_recorded: number; ticks_requested: number;
+  complete: boolean; headline: string;
+  policy: string; domain: string; seed: number;
+  actions: Record<string, any>;
+  llm: Record<string, any>;
+  exploration: Record<string, any>;
+  knowledge: Record<string, any>;
+  survival: Record<string, any>;
+  goals: Record<string, any>;
 };
 
 export type Claim = {
@@ -41,6 +67,8 @@ export const api = {
   metrics: (id: string) => get<any>(`/runs/${id}/metrics`),
   agents: (id: string) => get<any[]>(`/runs/${id}/agents`),
   replay: (id: string) => get<any>(`/runs/${id}/replay`),
+  report: (id: string) => get<Report>(`/runs/${id}/report`),
+  progress: (id: string) => get<Progress>(`/runs/${id}/progress`),
 };
 
 // Claim lifecycle colours. Refuted is deliberately not red-as-failure: a

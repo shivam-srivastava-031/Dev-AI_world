@@ -103,7 +103,9 @@ def cmd_run(args) -> int:
             done = tick + 1
             if done % args.checkpoint_every == 0 or done == cfg.ticks:
                 store.save_run(run_id, engine,
-                               manifest=manifest(cfg, domain, engine))
+                               manifest=manifest(cfg, domain, engine),
+                               status="running" if done < cfg.ticks
+                               else "complete")
                 rate = (_time.time() - started) / done
                 print(f"  tick {done}/{cfg.ticks}  "
                       f"trials={len(engine.trials)}  "

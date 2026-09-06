@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sqlite3
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
+from aiciv.experiment.report import report as build_report
 from aiciv.information import assert_no_leak
 from aiciv.persistence.replay import replay_actions
 from aiciv.persistence.store import RunStore
@@ -45,7 +47,11 @@ def _store(run_id: str) -> RunStore:
     path = RUNS_DIR / f"{run_id}.sqlite"
     if not path.exists():
         raise HTTPException(404, f"no run {run_id!r} in {RUNS_DIR}/")
-    return RunStore(path)
+    # Read-only, always. A run measured in hours is worth watching while it
+    # happens, and the observer must never take a write lock on the file the
+    # engine is still writing to. This also makes "no simulation logic here"
+    # structural rather than a convention.
+    return RunStore(path, read_only=True)
 
 
 def _public(rows: list[dict[str, Any]], *, keep_ground_truth: bool
@@ -69,9 +75,21 @@ def list_runs() -> list[dict[str, Any]]:
         return []
     out = []
     for path in sorted(RUNS_DIR.glob("*.sqlite")):
-        store = RunStore(path)
-        out.extend(store.runs())
-        store.close()
+        store = RunStore(path, read_only=True)
+        try:
+            out.extend(store.runs())
+        except sqlite3.DatabaseError:
+            # A run whose first checkpoint has not landed yet is a file with
+            # no tables. Skipping it beats failing the whole listing.
+            pass
+        finally:
+            store.close()
+    # Runs live in separate files, so per-file ordering says nothing once they
+    # are pooled. Newest first, then unfinished runs to the top: the run worth
+    # watching is the one still moving. Two stable sorts rather than one key,
+    # because the date is a string and cannot be reversed inside a tuple.
+    out.sort(key=lambda r: r["started_at"] or "", reverse=True)
+    out.sort(key=lambda r: r["ticks_recorded"] >= (r["ticks"] or 0))
     return out
 
 
@@ -208,6 +226,62 @@ def get_metrics(run_id: str) -> dict[str, Any]:
         if report is None:
             raise HTTPException(404, "no metrics recorded for this run")
         return report
+    finally:
+        store.close()
+
+
+@app.get("/runs/{run_id}/report")
+def get_report(run_id: str, ground_truth: bool = Query(False)) -> dict[str, Any]:
+    """The run report, readable from a partial checkpoint.
+
+    Separate from /metrics: that one returns the full civilization report,
+    which only exists once a run has finished. This is computed from whatever
+    has been written so far, and labels itself PARTIAL when that is what it is,
+    so a run in its twentieth hour can be watched rather than guessed at.
+
+    The report is written for a terminal operator, who is allowed the grading
+    view. The API is the observer boundary, so the stratum breakdown comes out
+    unless it is asked for deliberately -- the same rule /trials follows.
+    """
+    store = _store(run_id)
+    try:
+        out = build_report(store, run_id)
+        if "error" in out:
+            raise HTTPException(404, out["error"])
+        if not ground_truth:
+            out["exploration"].pop("trials_by_stratum", None)
+            assert_no_leak(out, where="/report")
+        return out
+    finally:
+        store.close()
+
+
+@app.get("/runs/{run_id}/progress")
+def get_progress(run_id: str) -> dict[str, Any]:
+    """Cheap enough to poll: just how far along the run is.
+
+    The dashboard polls this on a timer and only refetches the expensive views
+    when the tick count has actually moved. At four minutes a tick, polling the
+    full report instead would be almost entirely wasted work.
+    """
+    store = _store(run_id)
+    try:
+        meta = store.run(run_id)
+        if meta is None:
+            raise HTTPException(404, f"no run {run_id!r}")
+        recorded = len(store.state_hashes(run_id))
+        return {
+            "run_id": run_id,
+            "ticks_recorded": recorded,
+            "ticks_requested": meta["ticks"],
+            "status": meta["status"],
+            # Derived from the data rather than from the status column: a run
+            # killed between checkpoints leaves the column stale, and a
+            # checkpoint written by an older build says 'complete' regardless.
+            "live": recorded < (meta["ticks"] or 0),
+            "trials": len(store.trials(run_id, limit=200000)),
+            "claims": len(store.claims(run_id)),
+        }
     finally:
         store.close()
 
