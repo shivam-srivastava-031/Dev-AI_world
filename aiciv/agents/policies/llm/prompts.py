@@ -20,19 +20,23 @@ from __future__ import annotations
 import json
 from typing import Any
 
+# Both re-exported below: the banned list and its scanner are the information
+# boundary's business, but every existing caller looks for them here.
+from ....information import BANNED_TERMS as _BANNED_TERMS
+from ....information import scan_banned  # noqa: F401  re-export
+
 PROMPT_VERSION = "p1"
 
 SCAFFOLD_LEVELS = ("bare", "rules_only", "rules_plus_method")
 
 #: Never allowed to appear in a rules_only prompt. See
 #: docs/agent_prior_knowledge.md section 6.
-BANNED_TERMS = (
-    "hypothesis", "hypotheses", "experiment", "experimental", "control group",
-    "baseline", "replicate", "replication", "confound", "variable",
-    "significance", "significant", "sample size", "p-value", "scientific",
-    "science", "systematic", "methodical", "isolate", "hold constant",
-    "compare", "comparison", "evidence", "test",
-)
+#:
+#: Defined in ``information`` and re-exported here, where the scan has always
+#: lived. It moved because the API needs it too -- to report method vocabulary
+#: in an observer's brief -- and the API must not import policy machinery, or
+#: the engine acquires a dependency on the web server it is meant to outlive.
+BANNED_TERMS = _BANNED_TERMS
 
 BARE = """You are {name}, living in a world of tiles.
 Reply with a single JSON object choosing one action.
@@ -107,6 +111,35 @@ Reply with JSON only:
 "rationale": "<why, briefly>"}}
 """
 
+#: The observer's brief, when a run was launched under one.
+#:
+#: This block is the ONE place operator text reaches an agent, and a run that
+#: carries it is a steered run: the agents were told what to aim at, and any
+#: later statement about what they chose to do has to say so. It is absent
+#: entirely unless directives were passed, so an ordinary run is byte-identical
+#: to what it was before this existed.
+#:
+#: The wording around the directives is deliberately flat. "You have been asked
+#: to" states who wants it without adding urgency, a reward, or a method; a
+#: block that said "your goal is to maximise" would be handing over an
+#: objective function on top of the operator's sentence.
+ASSIGNMENT = """
+You have been asked to:
+{items}
+Nothing forces you to. What you actually do is your own choice.
+"""
+
+
+def assignment_block(directives: tuple[str, ...]) -> str:
+    """Render the brief. Empty for an unsteered run, and that emptiness is
+    what keeps those runs comparable with runs made before briefs existed."""
+    if not directives:
+        return ""
+    items = "\n".join(f"- {d.strip()}" for d in directives if d.strip())
+    if not items:
+        return ""
+    return ASSIGNMENT.format(items=items)
+
 
 def _fmt(v: Any) -> str:
     if isinstance(v, float):
@@ -149,7 +182,16 @@ def narrative(*, name: str, width: int, height: int,
 def system_prompt(*, name: str, width: int, height: int,
                   param_space: dict[str, tuple], schedule_axis: str,
                   others: str, scaffold: str,
-                  protocol_offered: bool = True) -> str:
+                  protocol_offered: bool = True,
+                  directives: tuple[str, ...] = ()) -> str:
+    """``directives`` is the observer's brief, and defaults to none.
+
+    It sits outside ``narrative`` on purpose: the banned-term scan is a test of
+    OUR prose, and sweeping an operator's own sentences into it would either
+    fail their run or, worse, tempt someone to loosen the scan. Contamination
+    in a directive is reported by ``scan_banned`` instead, where it is
+    attributed to the person who wrote it.
+    """
     body = narrative(name=name, width=width, height=height,
                      param_space=param_space, schedule_axis=schedule_axis,
                      others=others, scaffold=scaffold)
@@ -157,7 +199,7 @@ def system_prompt(*, name: str, width: int, height: int,
         plant_params=plant_params_help(param_space, schedule_axis))
     if protocol_offered:
         actions += PROTOCOL_ACTIONS
-    return body + actions + REPLY_FORMAT
+    return body + assignment_block(directives) + actions + REPLY_FORMAT
 
 
 def observation_block(obs, *, budget_chars: int = 2200) -> str:

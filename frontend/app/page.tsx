@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api, Claim, Progress, Report, RunSummary, STATE_COLOUR, World,
 } from "../lib/api";
+import TaskSection from "../components/Tasks";
 
 const GRID = 20;
 
@@ -48,6 +49,10 @@ export default function Page() {
               {r.run_id} — {r.policy} · {r.domain} · seed {r.seed} ·{" "}
               {r.ticks_recorded ?? r.ticks}/{r.ticks} ticks
               {r.ticks_recorded < r.ticks ? " · running" : ""}
+              {/* Steering, visible in the picker itself. This is where runs
+                  get chosen for comparison, so it is where a steered one has
+                  to announce itself. */}
+              {r.steered ? " · STEERED" : ""}
             </option>
           ))}
         </select>
@@ -80,18 +85,37 @@ function RunView({ runId }: { runId: string }) {
   }, [runId]);
 
   const recorded = progress?.ticks_recorded ?? 0;
+  const running = progress?.live ?? null;
 
+  // Cheap views, refreshed whenever the run has actually advanced.
   useEffect(() => {
     if (!progress) return;
-    let live = true;
-    const set = <T,>(f: (v: T) => void) => (v: T) => { if (live) f(v); };
+    let alive = true;
+    const set = <T,>(f: (v: T) => void) => (v: T) => { if (alive) f(v); };
     api.run(runId).then(set(setMeta)).catch(() => {});
     api.claims(runId).then(set(setClaims)).catch(() => {});
     api.report(runId).then(set(setReport)).catch(() => {});
-    api.metrics(runId).then(set(setMetrics)).catch(() => setMetrics(null));
-    api.replay(runId).then(set(setReplay)).catch(() => {});
-    return () => { live = false; };
+    return () => { alive = false; };
   }, [runId, recorded]);
+
+  // Replay re-executes every recorded tick, so its cost grows with the run and
+  // its answer barely changes between checkpoints. Once when the run is first
+  // seen, once more when it finishes -- not on every checkpoint.
+  //
+  // /metrics is the end-of-run report and does not exist yet on a live run.
+  // Asking for it anyway would put a 404 in the console every checkpoint, and
+  // console noise that is normal is console noise nobody reads.
+  useEffect(() => {
+    if (running === null) return;
+    let alive = true;
+    api.replay(runId).then((v) => { if (alive) setReplay(v); }).catch(() => {});
+    if (!running) {
+      api.metrics(runId)
+        .then((v) => { if (alive) setMetrics(v); })
+        .catch(() => setMetrics(null));
+    }
+    return () => { alive = false; };
+  }, [runId, running]);
 
   return (
     <>
@@ -101,6 +125,7 @@ function RunView({ runId }: { runId: string }) {
         <WorldMap runId={runId} ticks={recorded || (meta?.ticks ?? 0)} />
         <LiveReport report={report} />
       </div>
+      <TaskSection runId={runId} refreshKey={recorded} />
       <Metrics metrics={metrics} />
       <ClaimBoard claims={claims} />
     </>

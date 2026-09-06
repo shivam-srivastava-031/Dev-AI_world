@@ -43,3 +43,24 @@ input[type=range] { width: 100%; }
   border-left: 3px solid var(--accent); padding-left: .75rem;
   color: var(--muted); font-size: .85rem;
 }
+
+/* Form controls. The dashboard had none until the task board needed them:
+   selecting a run was the only input on the page, and a bare <select> on a
+   dark background was legible enough. A form the observer types into is not,
+   so these are styled to the same palette as everything else rather than left
+   to the browser's light-mode defaults. */
+input, select, button, textarea {
+  font: inherit;
+  color: var(--ink);
+  background: #12141a;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: .35rem .5rem;
+}
+input::placeholder { color: var(--muted); }
+input:focus, select:focus, textarea:focus, button:focus-visible {
+  outline: none; border-color: var(--accent);
+}
+button { cursor: pointer; background: #232735; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { cursor: default; color: var(--muted); }

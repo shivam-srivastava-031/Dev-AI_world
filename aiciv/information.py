@@ -75,6 +75,41 @@ FIELD_CLASS: dict[str, InfoClass] = {
     "rationale": InfoClass.PRIVATE,
 }
 
+#: Method vocabulary that must not appear in the rules_only prompt.
+#:
+#: This lives here rather than in the prompt module because it is a statement
+#: about the information boundary, not about prose. If "run controlled trials"
+#: reaches an agent, we have handed over the scientific method and any later
+#: claim about them applying it is circular -- the same class of mistake as
+#: leaking a stratum, and it belongs in the same file.
+#:
+#: The list is deliberately blunt: it is easier to keep a word out than to
+#: argue about whether a particular sentence implies it.
+BANNED_TERMS = (
+    "hypothesis", "hypotheses", "experiment", "experimental", "control group",
+    "baseline", "replicate", "replication", "confound", "variable",
+    "significance", "significant", "sample size", "p-value", "scientific",
+    "science", "systematic", "methodical", "isolate", "hold constant",
+    "compare", "comparison", "evidence", "test",
+)
+
+
+def scan_banned(text: str) -> list[str]:
+    """Which banned method terms a piece of text contains.
+
+    Used two ways, and the difference matters. Against OUR prompt templates it
+    is an assertion: a test fails if any term appears. Against an operator's
+    brief it is a report -- what an observer tells the agents is theirs to
+    decide, but a directive that says "run a controlled experiment" has handed
+    over the very thing rules_only withholds, and that run can no longer be
+    compared with one that was not given it. So it is surfaced at launch, in
+    the manifest and in the dashboard, rather than silently accepted or
+    silently refused.
+    """
+    low = text.lower()
+    return sorted({t for t in BANNED_TERMS if t in low})
+
+
 #: Substrings that must never appear as keys in anything handed to a policy.
 #: Cheap, blunt, and catches the realistic failure mode: someone adds a debug
 #: field called "true_mu_for_logging" and nobody notices for three months.

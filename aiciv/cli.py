@@ -17,11 +17,14 @@ from collections import Counter
 from typing import Any
 
 from .config import RunConfig
+from .information import scan_banned
 from .knowledge.shadow import ShadowVerifier, adoption_metrics
 from .metrics.adoption import adoption_report
 from .metrics.definitions import civilization_report
 from .persistence.replay import replay_actions
 from .persistence.store import RunStore
+from .tasks.board import DEFAULT_BOARD, BoardError, TaskBoard
+from .tasks.spec import score_board
 from .world.domains.agronomy import AgronomyDomain
 from .world.domains.synthetic import SyntheticDomain
 
@@ -62,20 +65,83 @@ def manifest(cfg: RunConfig, domain, engine) -> dict[str, Any]:
         "policy": cfg.policy, "scaffold_level": cfg.scaffold_level,
         "teaching_enabled": cfg.teaching_enabled, "water_hint": cfg.water_hint,
         "arm": cfg.arm, "python": platform.python_version(),
+        # Steering, recorded in the run itself rather than only in the task
+        # board. A run file has to be able to say on its own that its agents
+        # were told what to aim at; a reader six months from now may not have
+        # the board, and would otherwise read a steered run as a free one.
+        #
+        # `steered` is whether anything actually REACHED an agent, which is
+        # narrower than whether a brief was passed. Only the llm policy reads a
+        # prompt, so a brief handed to a scripted run was configured and never
+        # delivered -- `directives` still records what was asked for, and
+        # calling that run steered would attribute to its agents an instruction
+        # they were never given.
+        "steered": bool(cfg.directives) and cfg.policy == "llm",
+        "brief_id": cfg.brief_id or None,
+        "directives": list(cfg.directives),
+        "directives_reached_agents": cfg.policy == "llm",
+        "directive_method_terms": sorted({
+            t for d in cfg.directives for t in scan_banned(d)}),
     }
 
 
 # --- run -------------------------------------------------------------------
 
+def _announce_brief(brief_id: str, directives: tuple[str, ...],
+                    policy: str) -> None:
+    """Say plainly, at launch, that this run is not an unsteered one.
+
+    Printed to stderr before the first tick, because the moment to find out
+    that a run was steered is before it costs twenty hours -- not while reading
+    its report afterwards.
+    """
+    if not directives:
+        # A brief whose tasks all have empty directives says nothing out loud.
+        # The tasks are still scored, but this run is not steered and must not
+        # be reported as if it were.
+        print(f"BRIEF {brief_id}: no directive text, so nothing is said to the "
+              f"agents. Its tasks are scored; the run is not steered.",
+              file=sys.stderr)
+        return
+    print(f"BRIEFED RUN ({brief_id}): the agents are being told:",
+          file=sys.stderr)
+    for d in directives:
+        print(f"  - {d}", file=sys.stderr)
+    if policy != "llm":
+        # A scripted policy never reads a prompt. Saying nothing here would let
+        # someone believe they had steered a run that could not have heard them.
+        print("  NOTE: policy is not 'llm', so nothing reads the prompt. The "
+              "tasks will be scored, but these agents were not told anything.",
+              file=sys.stderr)
+    leaked = sorted({t for d in directives for t in scan_banned(d)})
+    if leaked:
+        print(f"  WARNING: the brief contains method vocabulary {leaked}. "
+              f"That is the operator's choice, but this run can no longer be "
+              f"compared against a rules_only run that was not given it.",
+              file=sys.stderr)
+
+
 def cmd_run(args) -> int:
     import aiciv.agents.policies  # noqa: F401  registers every policy
     from .world.engine import Engine
+
+    try:
+        board = TaskBoard(pathlib.Path(args.task_board))
+        directives = board.directives(args.brief) if args.brief else ()
+    except BoardError as e:
+        # A mistyped brief id must not cost a stack trace, and must not
+        # silently start an UNSTEERED run under a name the operator believes
+        # was steered -- that run would then be pooled with real ones.
+        raise SystemExit(f"cannot start: {e}") from e
+    if args.brief:
+        _announce_brief(args.brief, directives, args.policy)
 
     cfg = RunConfig(
         seed=args.seed, ticks=args.ticks, n_agents=args.agents,
         policy=args.policy, domain=args.domain,
         water_hint=not args.no_water_hint,
-        teaching_enabled=not args.no_teaching, arm=args.arm)
+        teaching_enabled=not args.no_teaching, arm=args.arm,
+        brief_id=args.brief or "", directives=directives)
     domain = build_domain(args.domain, cfg.water_hint)
     engine = Engine(cfg, domain)
 
@@ -86,9 +152,16 @@ def cmd_run(args) -> int:
         for aid in engine.state.agent_ids():
             engine.policies[int(aid)] = OllamaLLMPolicy(
                 model=args.model, host=args.host, scaffold=cfg.scaffold_level,
-                timeout=args.llm_timeout)
+                timeout=args.llm_timeout, directives=cfg.directives)
 
     run_id = args.run_id or f"{cfg.arm}_s{cfg.seed}_{cfg.policy}"
+
+    if args.brief:
+        # Attach before the run starts, not after. A twenty-hour run that is
+        # killed at hour twelve must still be on record as having been
+        # steered; recording that only on a clean exit would leave the most
+        # confusing case -- a partial steered run -- looking unsteered.
+        board.attach_brief(run_id, args.brief)
 
     if args.checkpoint_every > 0 and not args.no_save:
         # A long model-driven run is measured in hours. Without checkpointing,
@@ -161,6 +234,14 @@ def cmd_run(args) -> int:
         "claim_states": {k: v for k, v in engine.kb.counts().items() if v},
         "metrics": report,
     }
+    if not args.no_save:
+        # Scored from the file just written, not from the engine in memory:
+        # what the dashboard will show has to be what was actually persisted.
+        store = RunStore(RUNS / f"{run_id}.sqlite", read_only=True)
+        try:
+            out["tasks"] = score_board(board.run_tasks(run_id), store, run_id)
+        finally:
+            store.close()
     print(json.dumps(out, indent=2, default=str))
     return 0
 
@@ -187,6 +268,30 @@ def cmd_replay(args) -> int:
         return 0 if result.matched else 1
     finally:
         store.close()
+
+
+# --- tasks -----------------------------------------------------------------
+
+def cmd_tasks(args) -> int:
+    """Read the board. Authoring lives in the dashboard, and deliberately:
+    a task is a claim about what you were trying to find out, and it should be
+    written where you can see the run it is about."""
+    board = TaskBoard(pathlib.Path(args.task_board))
+    if args.run is None:
+        print(json.dumps({"board": str(board.path),
+                          "briefs": board.briefs()}, indent=2))
+        return 0
+    path = RUNS / f"{args.run}.sqlite"
+    if not path.exists():
+        print(f"no such run: {path}", file=sys.stderr)
+        return 1
+    store = RunStore(path, read_only=True)
+    try:
+        print(json.dumps(score_board(board.run_tasks(args.run), store, args.run),
+                         indent=2))
+    finally:
+        store.close()
+    return 0
 
 
 # --- metrics / experiments -------------------------------------------------
@@ -312,6 +417,12 @@ def main(argv: list[str] | None = None) -> int:
                    help="only used when --policy llm")
     r.add_argument("--host", default="http://127.0.0.1:11434")
     r.add_argument("--llm-timeout", type=float, default=300.0)
+    r.add_argument("--brief", default=None,
+                   help="brief id whose tasks are put IN THE AGENTS' PROMPT. "
+                        "This makes the run steered and not comparable with an "
+                        "unsteered one; it is recorded in the manifest as such")
+    r.add_argument("--task-board", default=str(DEFAULT_BOARD),
+                   help="where the task board JSON lives")
     r.add_argument("--checkpoint-every", type=int, default=0,
                    help="save partial state every N ticks; essential for runs "
                         "measured in hours")
@@ -325,6 +436,12 @@ def main(argv: list[str] | None = None) -> int:
     m = sub.add_parser("metrics", help="print the recorded metrics for a run")
     m.add_argument("--run", required=True)
     m.set_defaults(func=cmd_metrics)
+
+    t = sub.add_parser("tasks", help="score the task board for a run")
+    t.add_argument("--run", default=None,
+                   help="run id to score; omit to list the briefs instead")
+    t.add_argument("--task-board", default=str(DEFAULT_BOARD))
+    t.set_defaults(func=cmd_tasks)
 
     e = sub.add_parser("experiment", help="run arms x paired seeds")
     e.add_argument("--name", default="transfer")

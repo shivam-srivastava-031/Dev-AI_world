@@ -8,6 +8,13 @@ dist/
 venv/
 runs/
 !runs/.gitkeep
+
+# The observer's task board. Local state like runs/: which targets one person
+# set on their own runs is not part of the project. A brief that actually
+# steered a run is recorded in that run's manifest, so the provenance that
+# matters does not live here.
+/tasks/
+!/tasks/.gitkeep
 node_modules/
 .next/
 *.sqlite

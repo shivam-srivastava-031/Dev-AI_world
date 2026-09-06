@@ -173,13 +173,19 @@ class OllamaLLMPolicy:
 
     def __init__(self, model: str = DEFAULT_MODEL, host: str = DEFAULT_HOST,
                  scaffold: str = "rules_only", cache: LLMCache | None = None,
-                 temperature: float = 0.7, timeout: float = 300.0) -> None:
+                 temperature: float = 0.7, timeout: float = 300.0,
+                 directives: tuple[str, ...] = ()) -> None:
         # A generous per-call timeout. The agent prompt is far longer than a
         # bare question, and a cold model swap costs tens of seconds on its own.
         self.client = OllamaClient(model=model, host=host, timeout=timeout)
         self.scaffold = scaffold
         self.cache = cache
         self.temperature = temperature
+        #: The observer's brief, verbatim and in a fixed order. Empty for an
+        #: ordinary run, in which case the system prompt is byte-identical to
+        #: what it was before briefs existed -- which is what lets a steered
+        #: run and an unsteered one differ in exactly one thing.
+        self.directives = tuple(directives)
         self.parse_failures = 0
         self.transport_failures = 0
         self.calls = 0
@@ -236,7 +242,8 @@ class OllamaLLMPolicy:
             self._system = system_prompt(
                 name=obs.name, width=20, height=20,
                 param_space=ctx.param_space, schedule_axis=ctx.schedule_axis,
-                others=others, scaffold=self.scaffold)
+                others=others, scaffold=self.scaffold,
+                directives=self.directives)
 
         blocks = [observation_block(obs)]
         summary = summary_block(self._summary())

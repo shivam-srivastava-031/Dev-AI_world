@@ -64,14 +64,49 @@ class RunConfig:
     notes: str = ""
     extra: dict = field(default_factory=dict)
 
+    #: The observer's brief, when the run was launched under one. Empty means
+    #: unsteered: nobody told these agents what to aim at.
+    #:
+    #: Both fields are part of the config and therefore part of ``hash``, on
+    #: purpose. Two runs with the same seed and different briefs are two
+    #: different experiments, and if they shared a config hash the manifest
+    #: would claim they were the same one.
+    brief_id: str = ""
+    directives: tuple[str, ...] = ()
+
     def __post_init__(self) -> None:
         if self.scaffold_level not in ("bare", "rules_only", "rules_plus_method"):
             raise ValueError(f"bad scaffold_level: {self.scaffold_level}")
+        # Coerce rather than reject: a config round-tripped through JSON comes
+        # back with a list, and a list and a tuple of the same strings must not
+        # produce two different config hashes for the same run.
+        if not isinstance(self.directives, tuple):
+            object.__setattr__(self, "directives", tuple(self.directives))
+        if any(not isinstance(d, str) for d in self.directives):
+            raise ValueError("directives must be strings")
         if self.n_agents < 1:
             raise ValueError("need at least one agent")
         if self.max_concurrent_plots < 1:
             raise ValueError("need at least one plot")
 
+    #: Config fields that are omitted from the hash when they are empty.
+    #:
+    #: Steering is ADDED to the identity of a run rather than folded into it.
+    #: Hashing `brief_id=""` and `directives=()` alongside everything else
+    #: changed the hash of every unsteered config, so every run recorded before
+    #: briefs existed failed its own replay with "config hash mismatch" -- a
+    #: divergence that never happened, reported by the one check that exists to
+    #: tell you when a real one did.
+    #:
+    #: A steered run still hashes differently from an unsteered one, which is
+    #: the property that matters: two runs with the same seed and different
+    #: briefs are two different experiments and must not share an identity.
+    _OMITTED_WHEN_EMPTY = ("brief_id", "directives")
+
     @property
     def hash(self) -> str:
-        return blake2b_hex(asdict(self))
+        fields = asdict(self)
+        for name in self._OMITTED_WHEN_EMPTY:
+            if not fields[name]:
+                del fields[name]
+        return blake2b_hex(fields)

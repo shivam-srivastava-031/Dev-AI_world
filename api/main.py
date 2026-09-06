@@ -8,6 +8,13 @@ Every response passes through the same information boundary the agents face,
 enforced by ``assert_no_leak``. A debugging endpoint that returned the tile
 strata or true_mu would invalidate every experiment run after it was added --
 so the guard is in the response path rather than in a code-review checklist.
+
+One exception to "read layer", and it is narrow on purpose: the task board.
+An observer sets tasks here, and those writes go to ``tasks/board.json`` --
+never to a run's SQLite file, which is still opened read-only everywhere and
+still has no writer but the engine. A task cannot alter a run; the only way an
+observer reaches the agents is a brief, which is fixed before the run starts,
+recorded in that run's manifest, and marked steered wherever it is shown.
 """
 
 from __future__ import annotations
@@ -19,13 +26,17 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from aiciv.experiment.report import report as build_report
-from aiciv.information import assert_no_leak
+from aiciv.information import assert_no_leak, scan_banned
 from aiciv.persistence.replay import replay_actions
 from aiciv.persistence.store import RunStore
+from aiciv.tasks.board import DEFAULT_BOARD, BoardError, TaskBoard, new_id
+from aiciv.tasks.spec import COMPARATORS, Task, catalogue, score_board
 
 RUNS_DIR = pathlib.Path("runs")
+BOARD_PATH = DEFAULT_BOARD
 
 app = FastAPI(
     title="AI Civilization",
@@ -34,13 +45,28 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware, allow_origins=["http://localhost:3000"],
-    allow_methods=["GET"], allow_headers=["*"],
+    # POST and DELETE reach the task board and nothing else. Run data has no
+    # write route at all, from any method.
+    allow_methods=["GET", "POST", "DELETE"], allow_headers=["*"],
 )
 
 #: Fields stripped before anything leaves the API. The tile stratum and true_mu
 #: are METRICS_ONLY: a dashboard that displayed them would let a human observer
 #: leak them back to the experiment through prompt design.
 OBSERVER_ONLY = ("true_mu", "stratum", "signature")
+
+
+def _board() -> TaskBoard:
+    """Loaded per request rather than held open.
+
+    The board is a small JSON file that a person edits through a form; reading
+    it fresh each time costs nothing and means the API never serves a stale
+    copy after the file was changed by ``aiciv run --brief`` or by hand.
+    """
+    try:
+        return TaskBoard(BOARD_PATH)
+    except BoardError as e:
+        raise HTTPException(500, str(e)) from e
 
 
 def _store(run_id: str) -> RunStore:
@@ -90,6 +116,13 @@ def list_runs() -> list[dict[str, Any]]:
     # because the date is a string and cannot be reversed inside a tuple.
     out.sort(key=lambda r: r["started_at"] or "", reverse=True)
     out.sort(key=lambda r: r["ticks_recorded"] >= (r["ticks"] or 0))
+    # Steering, carried on the listing itself. A steered run has to be
+    # identifiable before it is opened -- the picker is where runs get compared
+    # against each other, and that is exactly where the difference matters.
+    board = _board()
+    for r in out:
+        r["steered"] = board.is_steered(r["run_id"])
+        r["tasks"] = len(board.run_tasks(r["run_id"]))
     return out
 
 
@@ -298,3 +331,177 @@ def verify_replay(run_id: str) -> dict[str, Any]:
         return replay_actions(store, run_id).to_dict()
     finally:
         store.close()
+
+
+# --- the task board --------------------------------------------------------
+#
+# The only write surface in this file. Everything below writes to
+# tasks/board.json and nothing else; the run stores stay read-only.
+
+
+class TaskIn(BaseModel):
+    """A task as the dashboard sends it.
+
+    ``source`` is NOT accepted from the client. Whether the agents were told
+    about a task is decided by which endpoint it arrived at -- a brief, before
+    the run, or a run, after it started -- and never by a field a caller could
+    set. A task that lied about that would silently turn a steered run into an
+    apparently free one.
+    """
+
+    title: str = Field(min_length=1, max_length=120)
+    metric: str
+    comparator: str
+    target: float = Field(ge=0)
+    #: Only meaningful on a brief: the sentence the agents actually read.
+    directive: str = Field(default="", max_length=400)
+
+
+class BriefIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+def _task_from(body: TaskIn) -> Task:
+    if body.comparator not in COMPARATORS:
+        raise HTTPException(422, f"comparator must be one of {COMPARATORS}")
+    try:
+        return Task(task_id=new_id("tsk"), title=body.title.strip(),
+                    metric=body.metric, comparator=body.comparator,
+                    target=float(body.target),
+                    directive=body.directive.strip())
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+
+
+@app.get("/tasks/metrics")
+def task_metrics() -> list[dict[str, Any]]:
+    """The measurable quantities a task may be built from.
+
+    Everything here is readable from a partial checkpoint. Nothing that only
+    exists in the end-of-run report is offered, because a task that cannot be
+    scored until the run ends cannot be monitored while it runs.
+    """
+    return catalogue()
+
+
+@app.get("/runs/{run_id}/tasks")
+def get_tasks(run_id: str) -> dict[str, Any]:
+    """The run's board, scored against the latest checkpoint."""
+    store = _store(run_id)
+    try:
+        out = score_board(_board().run_tasks(run_id), store, run_id)
+        assert_no_leak(out, where="/tasks")
+        return out
+    finally:
+        store.close()
+
+
+@app.post("/runs/{run_id}/tasks", status_code=201)
+def add_task(run_id: str, body: TaskIn) -> dict[str, Any]:
+    """Set an observer task on a run.
+
+    The run is already under way or already finished, so nothing added here can
+    reach the agents -- which is exactly why this is safe to do on a live run
+    and why a directive is ignored on this route.
+    """
+    _store(run_id).close()          # 404 for a run that does not exist
+    board = _board()
+    task = _task_from(body)
+    if task.directive:
+        raise HTTPException(
+            422, "a directive only means something in a brief, which is fixed "
+                 "before the run starts. This run is already going, so its "
+                 "agents cannot be told anything now.")
+    try:
+        board.add_run_task(run_id, task)
+    except BoardError as e:
+        raise HTTPException(400, str(e)) from e
+    return get_tasks(run_id)
+
+
+@app.delete("/runs/{run_id}/tasks/{task_id}")
+def delete_task(run_id: str, task_id: str) -> dict[str, Any]:
+    try:
+        _board().remove_run_task(run_id, task_id)
+    except BoardError as e:
+        raise HTTPException(404, str(e)) from e
+    return get_tasks(run_id)
+
+
+@app.get("/briefs")
+def list_briefs() -> list[dict[str, Any]]:
+    """Briefs: task sets written to be put in front of the agents.
+
+    A brief with a non-empty ``launched_runs`` is closed. It is the record of
+    what those agents were told, so it cannot be edited afterwards -- an edit
+    would leave the run's manifest describing a brief that no longer exists in
+    that form.
+    """
+    board = _board()
+    out = []
+    for brief in board.briefs():
+        directives = board.directives(brief["brief_id"])
+        out.append({
+            **brief,
+            "directives": list(directives),
+            "closed": bool(brief["launched_runs"]),
+            "command": (f"aiciv run --policy llm --brief {brief['brief_id']}"),
+            # Reported, never blocked. What an observer tells the agents is
+            # theirs to decide; whether it hands them method vocabulary the
+            # rules_only scaffold withholds is something they should be able
+            # to see before they spend twenty hours on the run.
+            "method_terms": sorted({t for d in directives
+                                    for t in scan_banned(d)}),
+        })
+    return out
+
+
+@app.post("/briefs", status_code=201)
+def create_brief(body: BriefIn) -> dict[str, Any]:
+    try:
+        return _board().create_brief(body.name)
+    except BoardError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.delete("/briefs/{brief_id}")
+def delete_brief(brief_id: str) -> dict[str, Any]:
+    board = _board()
+    try:
+        if board.brief(brief_id)["launched_runs"]:
+            raise HTTPException(
+                409, "this brief has been used by a run and is the record of "
+                     "what those agents were told; it cannot be deleted")
+        board.delete_brief(brief_id)
+    except BoardError as e:
+        raise HTTPException(404, str(e)) from e
+    return {"deleted": brief_id}
+
+
+@app.post("/briefs/{brief_id}/tasks", status_code=201)
+def add_brief_task(brief_id: str, body: TaskIn) -> dict[str, Any]:
+    """Add a task to a brief, and with it the sentence the agents will read.
+
+    A task with no directive is still allowed: the observer may want the target
+    scored without saying it out loud. That is the one case where a run is
+    steered on some tasks and not others, and the brief lists both so the
+    difference stays visible.
+    """
+    board = _board()
+    try:
+        board.add_brief_task(brief_id, _task_from(body))
+    except BoardError as e:
+        raise HTTPException(409, str(e)) from e
+    return {"brief": board.brief(brief_id),
+            "directives": list(board.directives(brief_id))}
+
+
+@app.delete("/briefs/{brief_id}/tasks/{task_id}")
+def delete_brief_task(brief_id: str, task_id: str) -> dict[str, Any]:
+    board = _board()
+    try:
+        board.remove_brief_task(brief_id, task_id)
+    except BoardError as e:
+        raise HTTPException(409, str(e)) from e
+    return {"brief": board.brief(brief_id),
+            "directives": list(board.directives(brief_id))}
